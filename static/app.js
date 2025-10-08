@@ -42,10 +42,11 @@ class PotholeDetector {
             const json = await res.json();
             const ready = json && json.status === 'ok';
             const samReady = !!json.sam_loaded;
-            this.captureBtn.disabled = !samReady;
-            this.uploadBtn.disabled = !samReady;
+            // Keep buttons enabled so users can still interact while model loads; we'll show warnings on detect
+            this.captureBtn.disabled = false;
+            this.uploadBtn.disabled = false;
             if (!samReady) {
-                setStatus('alert-warning', 'Model is loading on server. Capture/Upload disabled until ready...');
+                setStatus('alert-warning', 'Model is loading on server. You can queue actions; detection will work once ready.');
                 // Poll until model is ready
                 const poll = async () => {
                     try {
