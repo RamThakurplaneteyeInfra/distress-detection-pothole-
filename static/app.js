@@ -21,11 +21,54 @@ class PotholeDetector {
     }
 
     async init() {
+        await this.checkBackendStatus();
         await this.initCamera();
         this.initMap();
         this.initEventListeners();
         this.initSocket();
         this.loadPotholes();
+    }
+
+    async checkBackendStatus() {
+        const statusEl = document.getElementById('statusAlert');
+        const setStatus = (cls, text) => {
+            statusEl.className = `alert ${cls} py-2`;
+            statusEl.textContent = text;
+            statusEl.style.display = 'block';
+        };
+        try {
+            setStatus('alert-info', 'Checking backend status...');
+            const res = await fetch('/health', { cache: 'no-store' });
+            const json = await res.json();
+            const ready = json && json.status === 'ok';
+            const samReady = !!json.sam_loaded;
+            this.captureBtn.disabled = !samReady;
+            this.uploadBtn.disabled = !samReady;
+            if (!samReady) {
+                setStatus('alert-warning', 'Model is loading on server. Capture/Upload disabled until ready...');
+                // Poll until model is ready
+                const poll = async () => {
+                    try {
+                        const r = await fetch('/health', { cache: 'no-store' });
+                        const j = await r.json();
+                        if (j.sam_loaded) {
+                            this.captureBtn.disabled = false;
+                            this.uploadBtn.disabled = false;
+                            setStatus('alert-success', 'Model ready. You can capture or upload now.');
+                        } else {
+                            setTimeout(poll, 5000);
+                        }
+                    } catch (e) {
+                        setTimeout(poll, 5000);
+                    }
+                };
+                setTimeout(poll, 5000);
+            } else {
+                setStatus('alert-success', 'Model ready. You can capture or upload now.');
+            }
+        } catch (e) {
+            setStatus('alert-danger', `Backend check failed: ${e.message}`);
+        }
     }
 
     async initCamera() {
@@ -40,7 +83,7 @@ class PotholeDetector {
             console.error('Error accessing camera:', err);
             this.detectionResult.innerHTML = `
                 <div class="alert alert-warning">
-                    Camera access denied. Please use image upload instead.
+                    Camera access denied or unavailable. On desktop, camera may be blocked; try image upload.
                 </div>
             `;
         }
@@ -152,7 +195,12 @@ class PotholeDetector {
                     .bindPopup('Your current location')
                     .openPopup();
             },
-            (error) => { alert('Error getting location: ' + error.message); }
+            (error) => {
+                const isSecure = location.protocol === 'https:';
+                const hint = isSecure ? '' : '\nTip: Geolocation requires HTTPS to work in most browsers.';
+                alert('Error getting location: ' + error.message + hint);
+            },
+            { enableHighAccuracy: true, timeout: 10000 }
         );
     }
 
