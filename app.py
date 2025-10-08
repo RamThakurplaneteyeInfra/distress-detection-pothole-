@@ -40,14 +40,14 @@ def init_sam():
     try:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(f"Using device: {device}")
-        # Store checkpoint on persistent disk so it's cached across deploys
-        checkpoint = os.path.join(app.config['UPLOAD_FOLDER'], "sam_vit_b_01ec64.pth")
+        # Store checkpoint on persistent disk so it's cached across deploys; allow override
+        checkpoint = os.environ.get('SAM_CHECKPOINT_PATH', os.path.join(app.config['UPLOAD_FOLDER'], "sam_vit_b_01ec64.pth"))
         
         # Download checkpoint if it doesn't exist with retries/backoff
         if not os.path.exists(checkpoint):
             logger.info("Downloading SAM checkpoint...")
             import urllib.request, time
-            checkpoint_url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
+            checkpoint_url = os.environ.get('SAM_CHECKPOINT_URL', "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth")
             attempts = 5
             for attempt in range(1, attempts + 1):
                 try:
