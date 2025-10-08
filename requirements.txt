@@ -44,3 +44,4 @@ setuptools==68.2.2
 wheel==0.42.0
 fpdf2==2.7.9
 --extra-index-url https://download.pytorch.org/whl/cpu
+gdown==5.2.0
