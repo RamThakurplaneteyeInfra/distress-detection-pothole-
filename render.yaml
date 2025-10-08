@@ -3,8 +3,8 @@ services:
     name: road-pothole-detector
     env: python
     plan: starter
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn -k eventlet -w 1 --bind 0.0.0.0:$PORT app:app
+    buildCommand: pip install --upgrade pip setuptools wheel && pip install -r requirements.txt
+    startCommand: gunicorn --worker-class eventlet -w 1 --bind 0.0.0.0:$PORT app:app
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
