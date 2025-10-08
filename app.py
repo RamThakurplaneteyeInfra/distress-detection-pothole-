@@ -46,21 +46,35 @@ def init_sam():
         # Download checkpoint if it doesn't exist with retries/backoff
         if not os.path.exists(checkpoint):
             logger.info("Downloading SAM checkpoint...")
-            import urllib.request, time
+            import urllib.request, time, re, os as _os
             checkpoint_url = os.environ.get('SAM_CHECKPOINT_URL', "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth")
-            attempts = 5
-            for attempt in range(1, attempts + 1):
-                try:
-                    with urllib.request.urlopen(checkpoint_url, timeout=30) as response, open(checkpoint, 'wb') as out_file:
-                        out_file.write(response.read())
-                    logger.info("SAM checkpoint downloaded successfully!")
-                    break
-                except Exception as e:
-                    wait_seconds = min(30, 2 ** attempt)
-                    logger.error(f"Failed to download SAM checkpoint (attempt {attempt}/{attempts}): {str(e)}. Retrying in {wait_seconds}s...")
-                    time.sleep(wait_seconds)
-            if not os.path.exists(checkpoint):
-                logger.error("SAM checkpoint download failed after retries; continuing without SAM.")
+
+            def is_drive_url(url: str) -> bool:
+                return 'drive.google.com' in url
+
+            try:
+                if is_drive_url(checkpoint_url):
+                    logger.info("Detected Google Drive URL; using gdown.")
+                    import gdown
+                    # gdown supports both id-based and full URL
+                    gdown.download(checkpoint_url, checkpoint, quiet=False, fuzzy=True)
+                else:
+                    attempts = 5
+                    for attempt in range(1, attempts + 1):
+                        try:
+                            with urllib.request.urlopen(checkpoint_url, timeout=30) as response, open(checkpoint, 'wb') as out_file:
+                                out_file.write(response.read())
+                            logger.info("SAM checkpoint downloaded successfully!")
+                            break
+                        except Exception as e:
+                            wait_seconds = min(30, 2 ** attempt)
+                            logger.error(f"Failed to download SAM checkpoint (attempt {attempt}/{attempts}): {str(e)}. Retrying in {wait_seconds}s...")
+                            time.sleep(wait_seconds)
+            except Exception as e:
+                logger.error(f"SAM checkpoint download error: {str(e)}")
+
+            if not os.path.exists(checkpoint) or _os.path.getsize(checkpoint) < 1024:
+                logger.error("SAM checkpoint download failed; continuing without SAM.")
                 return False
         
         sam = sam_model_registry["vit_b"](checkpoint=checkpoint)
