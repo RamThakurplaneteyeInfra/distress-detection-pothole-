@@ -1,307 +1,259 @@
-# app.py - Full Windows-Compatible Version
-from flask import Flask, request, jsonify, render_template, send_file
-from flask_socketio import SocketIO
-import cv2
-import numpy as np
-import torch
-from segment_anything import sam_model_registry, SamPredictor
-from PIL import Image
-import io
-import os
-import logging
-import sqlite3
-from datetime import datetime
-from flask_cors import CORS
-import folium
+class PotholeDetector {
+    constructor() {
+        this.video = document.getElementById('video');
+        this.canvas = document.getElementById('canvas');
+        this.ctx = this.canvas.getContext('2d');
+        this.captureBtn = document.getElementById('captureBtn');
+        this.uploadBtn = document.getElementById('uploadBtn');
+        this.fileInput = document.getElementById('fileInput');
+        this.locationBtn = document.getElementById('getLocation');
+        this.detectionResult = document.getElementById('detectionResult');
+        this.potholesList = document.getElementById('potholesList');
+        
+        this.currentLocation = { latitude: null, longitude: null };
+        this.map = null;
+        this.markers = [];
+        this.socket = io();
+        
+        this.init();
+    }
 
-# ------------------------
-# Logging configuration
-# ------------------------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+    async init() {
+        await this.initCamera();
+        this.initMap();
+        this.initEventListeners();
+        this.initSocket();
+        this.loadPotholes();
+    }
 
-# ------------------------
-# Flask & SocketIO setup
-# ------------------------
-app = Flask(__name__)
-CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
+    async initCamera() {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { facingMode: 'environment' } 
+            });
+            this.video.srcObject = stream;
+            
+            this.video.addEventListener('loadedmetadata', () => {
+                this.canvas.width = this.video.videoWidth;
+                this.canvas.height = this.video.videoHeight;
+            });
+        } catch (err) {
+            console.error('Error accessing camera:', err);
+            this.detectionResult.innerHTML = `
+                <div class="alert alert-warning">
+                    Camera access denied. Please use image upload instead.
+                </div>
+            `;
+        }
+    }
 
-# ------------------------
-# Configuration
-# ------------------------
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['DATABASE'] = 'potholes.db'
-app.config['SECRET_KEY'] = 'your-secret-key-here'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
+    initMap() {
+        this.map = L.map('map').setView([40.7128, -74.0060], 13);
+        
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(this.map);
+    }
 
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+    initEventListeners() {
+        this.captureBtn.addEventListener('click', () => this.captureAndDetect());
+        this.uploadBtn.addEventListener('click', () => this.fileInput.click());
+        this.fileInput.addEventListener('change', (e) => this.handleFileUpload(e));
+        this.locationBtn.addEventListener('click', () => this.getCurrentLocation());
+    }
 
-# ------------------------
-# Global variables
-# ------------------------
-predictor = None
-sam_loaded = False
+    initSocket() {
+        this.socket.on('new_pothole', (pothole) => {
+            this.addPotholeToList(pothole);
+            this.addMarkerToMap(pothole);
+            this.showNotification(`New pothole detected! Severity: ${pothole.severity}`);
+        });
+    }
 
-# ------------------------
-# SAM Model Initialization
-# ------------------------
-def init_sam():
-    """Initialize SAM model"""
-    global predictor, sam_loaded
-    try:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info(f"Using device: {device}")
+    async captureAndDetect() {
+        if (!this.currentLocation.latitude) {
+            alert('Please get your location first');
+            return;
+        }
 
-        sam_checkpoint = "sam_vit_b_01ec64.pth"
-        if not os.path.exists(sam_checkpoint):
-            logger.error(f"SAM model checkpoint not found: {sam_checkpoint}")
-            return False
+        this.ctx.drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
+        
+        this.canvas.toBlob(async (blob) => {
+            await this.detectPothole(blob);
+        }, 'image/jpeg');
+    }
 
-        logger.info("Loading SAM model...")
-        sam = sam_model_registry["vit_b"](checkpoint=sam_checkpoint)
-        sam.to(device)
-        predictor = SamPredictor(sam)
-        sam_loaded = True
-        logger.info("SAM model loaded successfully!")
-        return True
-    except Exception as e:
-        logger.error(f"Error loading SAM model: {str(e)}")
-        return False
+    async handleFileUpload(event) {
+        const file = event.target.files[0];
+        if (file) {
+            await this.detectPothole(file);
+        }
+    }
 
-# ------------------------
-# Database Initialization
-# ------------------------
-def init_db():
-    """Initialize SQLite database"""
-    try:
-        conn = sqlite3.connect(app.config['DATABASE'])
-        c = conn.cursor()
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS potholes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                latitude REAL,
-                longitude REAL,
-                severity TEXT,
-                area REAL,
-                image_path TEXT,
-                confidence REAL,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                status TEXT DEFAULT 'reported'
-            )
-        ''')
-        conn.commit()
-        conn.close()
-        logger.info("Database initialized successfully!")
-    except Exception as e:
-        logger.error(f"Error initializing database: {str(e)}")
+    async detectPothole(imageBlob) {
+        const formData = new FormData();
+        formData.append('image', imageBlob);
+        formData.append('latitude', this.currentLocation.latitude);
+        formData.append('longitude', this.currentLocation.longitude);
 
-# ------------------------
-# Application Initialization
-# ------------------------
-def initialize_app():
-    """Initialize SAM model and database before starting the server."""
-    logger.info("Initializing application...")
-    sam_ok = init_sam()
-    init_db()
-    
-    if not sam_ok:
-        logger.warning("SAM model not loaded. Detection will fail until SAM is available.")
-    else:
-        logger.info("SAM model is ready.")
+        try {
+            this.detectionResult.innerHTML = `
+                <div class="alert alert-info">
+                    <div class="spinner-border spinner-border-sm me-2"></div>
+                    Detecting potholes...
+                </div>
+            `;
 
-# ------------------------
-# Utility Functions
-# ------------------------
-def estimate_real_world_area(area_pixels, image_shape):
-    """Estimate real-world area in square meters (simplified)"""
-    pixels_per_meter = 100  # calibration required for real-world accuracy
-    return area_pixels / (pixels_per_meter ** 2)
+            const response = await fetch('/detect', {
+                method: 'POST',
+                body: formData
+            });
 
-def determine_severity(area_m2):
-    """Determine pothole severity based on area"""
-    if area_m2 < 0.1:
-        return 'low'
-    elif area_m2 < 0.3:
-        return 'medium'
-    else:
-        return 'high'
+            const result = await response.json();
 
-def create_overlay_image(image_np, mask):
-    """Overlay detected pothole in red"""
-    overlay = image_np.copy()
-    overlay[mask > 0] = [255, 0, 0]
-    return overlay
+            if (result.success) {
+                this.detectionResult.innerHTML = `
+                    <div class="alert alert-success">
+                        <h6>Pothole Detected!</h6>
+                        <p><strong>Severity:</strong> ${result.severity}</p>
+                        <p><strong>Area:</strong> ${result.area_m2.toFixed(2)} m²</p>
+                        <p><strong>Confidence:</strong> ${(result.confidence * 100).toFixed(1)}%</p>
+                        <img src="${result.image_url}" class="img-fluid mt-2" alt="Detected pothole">
+                    </div>
+                `;
+            } else {
+                this.detectionResult.innerHTML = `
+                    <div class="alert alert-warning">
+                        No pothole detected. Please try a different image.
+                    </div>
+                `;
+            }
+        } catch (error) {
+            console.error('Detection error:', error);
+            this.detectionResult.innerHTML = `
+                <div class="alert alert-danger">
+                    Error detecting pothole: ${error.message}
+                </div>
+            `;
+        }
+    }
 
-# ------------------------
-# Routes
-# ------------------------
-@app.route('/')
-def index():
-    return render_template('index.html', sam_loaded=sam_loaded)
+    getCurrentLocation() {
+        if (!navigator.geolocation) {
+            alert('Geolocation is not supported by your browser');
+            return;
+        }
 
-@app.route('/health')
-def health():
-    return jsonify({
-        'status': 'healthy',
-        'sam_loaded': sam_loaded,
-        'database': app.config['DATABASE']
-    })
+        navigator.geolocation.getCurrentPosition(
+            (position) => {
+                this.currentLocation = {
+                    latitude: position.coords.latitude,
+                    longitude: position.coords.longitude
+                };
 
-@app.route('/detect', methods=['POST'])
-def detect_pothole():
-    if not sam_loaded:
-        return jsonify({'error': 'SAM model not loaded'}), 500
+                document.getElementById('latitude').textContent = this.currentLocation.latitude.toFixed(6);
+                document.getElementById('longitude').textContent = this.currentLocation.longitude.toFixed(6);
 
-    if 'image' not in request.files:
-        return jsonify({'error': 'No image provided'}), 400
+                // Update map view
+                this.map.setView([this.currentLocation.latitude, this.currentLocation.longitude], 15);
+                
+                L.marker([this.currentLocation.latitude, this.currentLocation.longitude])
+                    .addTo(this.map)
+                    .bindPopup('Your current location')
+                    .openPopup();
+            },
+            (error) => {
+                alert('Error getting location: ' + error.message);
+            }
+        );
+    }
 
-    image_file = request.files['image']
-    if image_file.filename == '':
-        return jsonify({'error': 'No image selected'}), 400
+    async loadPotholes() {
+        try {
+            const response = await fetch('/potholes');
+            const potholes = await response.json();
+            
+            this.potholesList.innerHTML = '';
+            this.clearMapMarkers();
+            
+            potholes.forEach(pothole => {
+                this.addPotholeToList(pothole);
+                this.addMarkerToMap(pothole);
+            });
+        } catch (error) {
+            console.error('Error loading potholes:', error);
+        }
+    }
 
-    latitude = float(request.form.get('latitude', 0.0))
-    longitude = float(request.form.get('longitude', 0.0))
+    addPotholeToList(pothole) {
+        const severityClass = `severity-${pothole.severity}`;
+        const date = new Date(pothole.timestamp).toLocaleString();
+        
+        const potholeElement = document.createElement('div');
+        potholeElement.className = `card mb-2 ${severityClass}`;
+        potholeElement.innerHTML = `
+            <div class="card-body py-2">
+                <h6 class="card-title mb-1">Pothole #${pothole.id}</h6>
+                <p class="card-text mb-1">
+                    <small>Severity: <span class="badge bg-${this.getSeverityColor(pothole.severity)}">${pothole.severity}</span></small>
+                    <small>Area: ${pothole.area.toFixed(2)} m²</small>
+                </p>
+                <p class="card-text mb-0">
+                    <small class="text-muted">${date}</small>
+                </p>
+            </div>
+        `;
+        
+        this.potholesList.prepend(potholeElement);
+    }
 
-    logger.info(f"Processing image from location: {latitude}, {longitude}")
+    addMarkerToMap(pothole) {
+        const marker = L.marker([pothole.latitude, pothole.longitude])
+            .addTo(this.map)
+            .bindPopup(`
+                <strong>Pothole #${pothole.id}</strong><br>
+                Severity: ${pothole.severity}<br>
+                Area: ${pothole.area.toFixed(2)} m²<br>
+                Confidence: ${(pothole.confidence * 100).toFixed(1)}%
+            `);
+        
+        this.markers.push(marker);
+    }
 
-    image = Image.open(image_file.stream).convert('RGB')
-    image_np = np.array(image)
+    clearMapMarkers() {
+        this.markers.forEach(marker => this.map.removeLayer(marker));
+        this.markers = [];
+    }
 
-    # Set image for SAM predictor
-    predictor.set_image(image_np)
+    getSeverityColor(severity) {
+        switch (severity) {
+            case 'high': return 'danger';
+            case 'medium': return 'warning';
+            case 'low': return 'success';
+            default: return 'secondary';
+        }
+    }
 
-    h, w = image_np.shape[:2]
-    input_point = np.array([[w//2, h//2]])
-    input_label = np.array([1])
+    showNotification(message) {
+        const notification = document.createElement('div');
+        notification.className = 'alert alert-info alert-dismissible fade show position-fixed';
+        notification.style.cssText = 'top: 20px; right: 20px; z-index: 1000; min-width: 300px;';
+        notification.innerHTML = `
+            ${message}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        `;
+        
+        document.body.appendChild(notification);
+        
+        setTimeout(() => {
+            if (notification.parentNode) {
+                notification.parentNode.removeChild(notification);
+            }
+        }, 5000);
+    }
+}
 
-    masks, scores, _ = predictor.predict(
-        point_coords=input_point,
-        point_labels=input_label,
-        multimask_output=False
-    )
-
-    if len(masks) == 0 or masks[0].size == 0:
-        return jsonify({'error': 'No pothole detected'}), 400
-
-    mask = masks[0]
-    confidence = float(scores[0])
-    area_pixels = np.sum(mask)
-    area_m2 = estimate_real_world_area(area_pixels, image_np.shape)
-    severity = determine_severity(area_m2)
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"pothole_{timestamp}.jpg"
-    filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-
-    overlay = create_overlay_image(image_np, mask)
-    Image.fromarray(overlay).save(filepath)
-
-    # Store in database
-    conn = sqlite3.connect(app.config['DATABASE'])
-    c = conn.cursor()
-    c.execute('''
-        INSERT INTO potholes (latitude, longitude, severity, area, image_path, confidence)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (latitude, longitude, severity, area_m2, filepath, confidence))
-    pothole_id = c.lastrowid
-    conn.commit()
-    conn.close()
-
-    # Broadcast to clients
-    socketio.emit('new_pothole', {
-        'id': pothole_id,
-        'latitude': latitude,
-        'longitude': longitude,
-        'severity': severity,
-        'area': area_m2,
-        'confidence': confidence,
-        'timestamp': datetime.now().isoformat()
-    })
-
-    logger.info(f"Pothole detected: ID {pothole_id}, Severity: {severity}, Area: {area_m2:.2f} m²")
-
-    return jsonify({
-        'success': True,
-        'pothole_id': pothole_id,
-        'severity': severity,
-        'area_m2': area_m2,
-        'confidence': confidence,
-        'image_url': f'/image/{filename}'
-    })
-
-@app.route('/potholes')
-def get_potholes():
-    try:
-        conn = sqlite3.connect(app.config['DATABASE'])
-        c = conn.cursor()
-        c.execute('SELECT * FROM potholes ORDER BY timestamp DESC')
-        potholes = c.fetchall()
-        conn.close()
-
-        result = []
-        for p in potholes:
-            result.append({
-                'id': p[0],
-                'latitude': p[1],
-                'longitude': p[2],
-                'severity': p[3],
-                'area': p[4],
-                'image_path': p[5],
-                'confidence': p[6],
-                'timestamp': p[7],
-                'status': p[8]
-            })
-        return jsonify(result)
-    except Exception as e:
-        logger.error(f"Error getting potholes: {str(e)}")
-        return jsonify([])
-
-@app.route('/image/<filename>')
-def get_image(filename):
-    try:
-        return send_file(os.path.join(app.config['UPLOAD_FOLDER'], filename))
-    except Exception as e:
-        logger.error(f"Error serving image: {str(e)}")
-        return jsonify({'error': 'Image not found'}), 404
-
-@app.route('/map')
-def show_map():
-    try:
-        conn = sqlite3.connect(app.config['DATABASE'])
-        c = conn.cursor()
-        c.execute('SELECT latitude, longitude, severity, id FROM potholes')
-        potholes = c.fetchall()
-        conn.close()
-
-        center_lat, center_lon = (potholes[0][0], potholes[0][1]) if potholes else (40.7128, -74.0060)
-        m = folium.Map(location=[center_lat, center_lon], zoom_start=12)
-
-        for lat, lon, severity, pid in potholes:
-            color = 'red' if severity == 'high' else 'orange' if severity == 'medium' else 'green'
-            folium.Marker(
-                [lat, lon],
-                popup=f'Pothole #{pid}<br>Severity: {severity}',
-                icon=folium.Icon(color=color, icon='info-sign')
-            ).add_to(m)
-
-        return m._repr_html_()
-    except Exception as e:
-        logger.error(f"Error generating map: {str(e)}")
-        return f"<h1>Error generating map: {str(e)}</h1>"
-
-@app.route('/status')
-def status():
-    return jsonify({
-        'sam_loaded': sam_loaded,
-        'database_exists': os.path.exists(app.config['DATABASE']),
-        'upload_folder_exists': os.path.exists(app.config['UPLOAD_FOLDER'])
-    })
-
-# ------------------------
-# Main Entry Point
-# ------------------------
-if __name__ == '__main__':
-    initialize_app()
-    logger.info("Starting PotholeDetector server on http://0.0.0.0:5000 ...")
-    socketio.run(app, debug=True, host='0.0.0.0', port=5000)
+// Initialize the application when the page loads
+document.addEventListener('DOMContentLoaded', () => {
+    new PotholeDetector();
+});
