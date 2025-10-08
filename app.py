@@ -1,18 +1,14 @@
-# app.py - Full Windows-Compatible Version
-from flask import Flask, request, jsonify, render_template, send_file
+from flask import Flask, request, jsonify, render_template, send_file, abort
 from flask_socketio import SocketIO
-import cv2
+from flask_cors import CORS
+from PIL import Image
+import io, os, sqlite3, logging
+from datetime import datetime
 import numpy as np
 import torch
 from segment_anything import sam_model_registry, SamPredictor
-from PIL import Image
-import io
-import os
-import logging
-import sqlite3
-from datetime import datetime
-from flask_cors import CORS
 import folium
+from fpdf import FPDF
 
 # ------------------------
 # Logging configuration
@@ -21,116 +17,87 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ------------------------
-# Flask & SocketIO setup
+# Flask setup
 # ------------------------
 app = Flask(__name__)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# ------------------------
-# Configuration
-# ------------------------
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['DATABASE'] = 'potholes.db'
 app.config['SECRET_KEY'] = 'your-secret-key-here'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
-
+app.config['MAX_CONTENT_LENGTH'] = 16*1024*1024  # 16 MB
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # ------------------------
-# Global variables
+# SAM Model
 # ------------------------
 predictor = None
 sam_loaded = False
 
-# ------------------------
-# SAM Model Initialization
-# ------------------------
 def init_sam():
-    """Initialize SAM model"""
     global predictor, sam_loaded
     try:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(f"Using device: {device}")
-
-        sam_checkpoint = "sam_vit_b_01ec64.pth"
-        if not os.path.exists(sam_checkpoint):
-            logger.error(f"SAM model checkpoint not found: {sam_checkpoint}")
+        checkpoint = "sam_vit_b_01ec64.pth"
+        if not os.path.exists(checkpoint):
+            logger.error("SAM checkpoint missing!")
             return False
-
-        logger.info("Loading SAM model...")
-        sam = sam_model_registry["vit_b"](checkpoint=sam_checkpoint)
+        sam = sam_model_registry["vit_b"](checkpoint=checkpoint)
         sam.to(device)
         predictor = SamPredictor(sam)
         sam_loaded = True
-        logger.info("SAM model loaded successfully!")
+        logger.info("SAM loaded successfully!")
         return True
     except Exception as e:
-        logger.error(f"Error loading SAM model: {str(e)}")
+        logger.error(f"SAM init error: {str(e)}")
         return False
 
 # ------------------------
-# Database Initialization
+# Database
 # ------------------------
 def init_db():
-    """Initialize SQLite database"""
-    try:
-        conn = sqlite3.connect(app.config['DATABASE'])
-        c = conn.cursor()
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS potholes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                latitude REAL,
-                longitude REAL,
-                severity TEXT,
-                area REAL,
-                image_path TEXT,
-                confidence REAL,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                status TEXT DEFAULT 'reported'
-            )
-        ''')
-        conn.commit()
-        conn.close()
-        logger.info("Database initialized successfully!")
-    except Exception as e:
-        logger.error(f"Error initializing database: {str(e)}")
+    conn = sqlite3.connect(app.config['DATABASE'])
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS potholes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            latitude REAL,
+            longitude REAL,
+            severity TEXT,
+            area REAL,
+            depth_meters REAL,
+            image_path TEXT,
+            confidence REAL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            status TEXT DEFAULT 'reported'
+        )
+    ''')
+    conn.commit()
+    conn.close()
+    logger.info("Database initialized")
 
 # ------------------------
-# Application Initialization
+# Utility
 # ------------------------
-def initialize_app():
-    """Initialize SAM model and database before starting the server."""
-    logger.info("Initializing application...")
-    sam_ok = init_sam()
-    init_db()
-    
-    if not sam_ok:
-        logger.warning("SAM model not loaded. Detection will fail until SAM is available.")
-    else:
-        logger.info("SAM model is ready.")
+def estimate_area(area_pixels):
+    pixels_per_meter = 100  # adjust for real calibration
+    return area_pixels / (pixels_per_meter**2)
 
-# ------------------------
-# Utility Functions
-# ------------------------
-def estimate_real_world_area(area_pixels, image_shape):
-    """Estimate real-world area in square meters (simplified)"""
-    pixels_per_meter = 100  # calibration required for real-world accuracy
-    return area_pixels / (pixels_per_meter ** 2)
+def estimate_depth(area_m2):
+    # Rough depth estimation: small area -> shallow, large area -> deeper
+    # Example scaling: 0.05 m minimum, +0.2 m for large potholes
+    return 0.05 + min(area_m2 * 0.5, 0.5)
 
 def determine_severity(area_m2):
-    """Determine pothole severity based on area"""
-    if area_m2 < 0.1:
-        return 'low'
-    elif area_m2 < 0.3:
-        return 'medium'
-    else:
-        return 'high'
+    if area_m2 < 0.1: return 'low'
+    if area_m2 < 0.3: return 'medium'
+    return 'high'
 
-def create_overlay_image(image_np, mask):
-    """Overlay detected pothole in red"""
+def overlay_image(image_np, mask):
     overlay = image_np.copy()
-    overlay[mask > 0] = [255, 0, 0]
+    overlay[mask>0] = [255,0,0]
     return overlay
 
 # ------------------------
@@ -138,23 +105,14 @@ def create_overlay_image(image_np, mask):
 # ------------------------
 @app.route('/')
 def index():
-    return render_template('index.html', sam_loaded=sam_loaded)
-
-@app.route('/health')
-def health():
-    return jsonify({
-        'status': 'healthy',
-        'sam_loaded': sam_loaded,
-        'database': app.config['DATABASE']
-    })
+    return render_template('index1.html', sam_loaded=sam_loaded)
 
 @app.route('/detect', methods=['POST'])
 def detect_pothole():
     if not sam_loaded:
-        return jsonify({'error': 'SAM model not loaded'}), 500
-
+        return jsonify({'error': 'SAM not loaded'}), 500
     if 'image' not in request.files:
-        return jsonify({'error': 'No image provided'}), 400
+        return jsonify({'error': 'No image uploaded'}), 400
 
     image_file = request.files['image']
     if image_file.filename == '':
@@ -163,16 +121,12 @@ def detect_pothole():
     latitude = float(request.form.get('latitude', 0.0))
     longitude = float(request.form.get('longitude', 0.0))
 
-    logger.info(f"Processing image from location: {latitude}, {longitude}")
-
     image = Image.open(image_file.stream).convert('RGB')
     image_np = np.array(image)
 
-    # Set image for SAM predictor
     predictor.set_image(image_np)
-
-    h, w = image_np.shape[:2]
-    input_point = np.array([[w//2, h//2]])
+    h,w = image_np.shape[:2]
+    input_point = np.array([[w//2,h//2]])
     input_label = np.array([1])
 
     masks, scores, _ = predictor.predict(
@@ -181,127 +135,135 @@ def detect_pothole():
         multimask_output=False
     )
 
-    if len(masks) == 0 or masks[0].size == 0:
-        return jsonify({'error': 'No pothole detected'}), 400
+    if len(masks)==0 or masks[0].size==0:
+        return jsonify({'success': False})
 
     mask = masks[0]
     confidence = float(scores[0])
     area_pixels = np.sum(mask)
-    area_m2 = estimate_real_world_area(area_pixels, image_np.shape)
+    area_m2 = estimate_area(area_pixels)
     severity = determine_severity(area_m2)
+    depth_meters = estimate_depth(area_m2)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"pothole_{timestamp}.jpg"
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
 
-    overlay = create_overlay_image(image_np, mask)
+    overlay = overlay_image(image_np, mask)
     Image.fromarray(overlay).save(filepath)
 
-    # Store in database
     conn = sqlite3.connect(app.config['DATABASE'])
     c = conn.cursor()
     c.execute('''
-        INSERT INTO potholes (latitude, longitude, severity, area, image_path, confidence)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (latitude, longitude, severity, area_m2, filepath, confidence))
+        INSERT INTO potholes (latitude, longitude, severity, area, depth_meters, image_path, confidence)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (latitude, longitude, severity, area_m2, depth_meters, filepath, confidence))
     pothole_id = c.lastrowid
     conn.commit()
     conn.close()
 
-    # Broadcast to clients
     socketio.emit('new_pothole', {
         'id': pothole_id,
         'latitude': latitude,
         'longitude': longitude,
         'severity': severity,
         'area': area_m2,
+        'depth_meters': depth_meters,
         'confidence': confidence,
         'timestamp': datetime.now().isoformat()
     })
-
-    logger.info(f"Pothole detected: ID {pothole_id}, Severity: {severity}, Area: {area_m2:.2f} m²")
 
     return jsonify({
         'success': True,
         'pothole_id': pothole_id,
         'severity': severity,
         'area_m2': area_m2,
+        'depth_meters': depth_meters,
         'confidence': confidence,
         'image_url': f'/image/{filename}'
     })
 
 @app.route('/potholes')
 def get_potholes():
-    try:
-        conn = sqlite3.connect(app.config['DATABASE'])
-        c = conn.cursor()
-        c.execute('SELECT * FROM potholes ORDER BY timestamp DESC')
-        potholes = c.fetchall()
-        conn.close()
-
-        result = []
-        for p in potholes:
-            result.append({
-                'id': p[0],
-                'latitude': p[1],
-                'longitude': p[2],
-                'severity': p[3],
-                'area': p[4],
-                'image_path': p[5],
-                'confidence': p[6],
-                'timestamp': p[7],
-                'status': p[8]
-            })
-        return jsonify(result)
-    except Exception as e:
-        logger.error(f"Error getting potholes: {str(e)}")
-        return jsonify([])
+    conn = sqlite3.connect(app.config['DATABASE'])
+    c = conn.cursor()
+    c.execute('SELECT * FROM potholes ORDER BY timestamp DESC')
+    rows = c.fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        result.append({
+            'id': r[0],
+            'latitude': r[1],
+            'longitude': r[2],
+            'severity': r[3],
+            'area': r[4],
+            'depth_meters': r[5],
+            'image_path': r[6],
+            'confidence': r[7],
+            'timestamp': r[8],
+            'status': r[9]
+        })
+    return jsonify(result)
 
 @app.route('/image/<filename>')
 def get_image(filename):
-    try:
-        return send_file(os.path.join(app.config['UPLOAD_FOLDER'], filename))
-    except Exception as e:
-        logger.error(f"Error serving image: {str(e)}")
-        return jsonify({'error': 'Image not found'}), 404
+    path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    if os.path.exists(path):
+        return send_file(path)
+    return abort(404)
+
+@app.route('/export/<int:pothole_id>')
+def export_pdf(pothole_id):
+    conn = sqlite3.connect(app.config['DATABASE'])
+    c = conn.cursor()
+    c.execute('SELECT * FROM potholes WHERE id=?', (pothole_id,))
+    row = c.fetchone()
+    conn.close()
+    if not row: return abort(404)
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(0, 10, f"Pothole Report #{row[0]}", ln=True)
+    pdf.set_font("Arial", "", 12)
+    pdf.ln(5)
+    pdf.cell(0, 8, f"Latitude: {row[1]}", ln=True)
+    pdf.cell(0, 8, f"Longitude: {row[2]}", ln=True)
+    pdf.cell(0, 8, f"Severity: {row[3]}", ln=True)
+    pdf.cell(0, 8, f"Area: {row[4]:.2f} m²", ln=True)
+    pdf.cell(0, 8, f"Depth: {row[5]:.2f} m", ln=True)
+    pdf.cell(0, 8, f"Confidence: {row[7]*100:.1f}%", ln=True)
+    pdf.cell(0, 8, f"Timestamp: {row[8]}", ln=True)
+    pdf.ln(5)
+    if os.path.exists(row[6]):
+        pdf.image(row[6], w=150)
+    pdf_path = os.path.join(app.config['UPLOAD_FOLDER'], f"pothole_report_{row[0]}.pdf")
+    pdf.output(pdf_path)
+    return send_file(pdf_path)
 
 @app.route('/map')
 def show_map():
-    try:
-        conn = sqlite3.connect(app.config['DATABASE'])
-        c = conn.cursor()
-        c.execute('SELECT latitude, longitude, severity, id FROM potholes')
-        potholes = c.fetchall()
-        conn.close()
-
-        center_lat, center_lon = (potholes[0][0], potholes[0][1]) if potholes else (40.7128, -74.0060)
-        m = folium.Map(location=[center_lat, center_lon], zoom_start=12)
-
-        for lat, lon, severity, pid in potholes:
-            color = 'red' if severity == 'high' else 'orange' if severity == 'medium' else 'green'
-            folium.Marker(
-                [lat, lon],
-                popup=f'Pothole #{pid}<br>Severity: {severity}',
-                icon=folium.Icon(color=color, icon='info-sign')
-            ).add_to(m)
-
-        return m._repr_html_()
-    except Exception as e:
-        logger.error(f"Error generating map: {str(e)}")
-        return f"<h1>Error generating map: {str(e)}</h1>"
-
-@app.route('/status')
-def status():
-    return jsonify({
-        'sam_loaded': sam_loaded,
-        'database_exists': os.path.exists(app.config['DATABASE']),
-        'upload_folder_exists': os.path.exists(app.config['UPLOAD_FOLDER'])
-    })
+    conn = sqlite3.connect(app.config['DATABASE'])
+    c = conn.cursor()
+    c.execute('SELECT latitude, longitude, severity, id FROM potholes')
+    rows = c.fetchall()
+    conn.close()
+    center = (rows[0][0], rows[0][1]) if rows else (40.7128, -74.0060)
+    m = folium.Map(location=center, zoom_start=13)
+    for lat, lon, severity, pid in rows:
+        color = 'red' if severity=='high' else 'orange' if severity=='medium' else 'green'
+        folium.Marker([lat, lon], popup=f"Pothole #{pid}\nSeverity: {severity}", icon=folium.Icon(color=color)).add_to(m)
+    return m._repr_html_()
 
 # ------------------------
-# Main Entry Point
+# Main
 # ------------------------
-if __name__ == '__main__':
+def initialize_app():
+    init_sam()
+    init_db()
+    logger.info("App initialized")
+
+if __name__ == "__main__":
     initialize_app()
-    logger.info("Starting PotholeDetector server on http://0.0.0.0:5000 ...")
-    socketio.run(app, debug=True, host='0.0.0.0', port=5000)
+    socketio.run(app, host="0.0.0.0", port=5000, debug=True)
