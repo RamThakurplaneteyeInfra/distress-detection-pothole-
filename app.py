@@ -176,8 +176,8 @@ def detect_pothole():
     severity = determine_severity(area_m2)
     depth_meters = estimate_depth(area_m2)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"pothole_{timestamp}.jpg"
+    timestamp_utc = datetime.now(timezone.utc)
+    filename = f"pothole_{timestamp_utc.strftime('%Y%m%d_%H%M%S')}.jpg"
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
 
     overlay = overlay_image(image_np, mask)
@@ -218,14 +218,14 @@ def detect_pothole():
 def get_potholes():
     conn = sqlite3.connect(app.config['DATABASE'])
     conn.row_factory = sqlite3.Row
-    c.execute('SELECT * FROM potholes ORDER BY timestamp DESC')
-    rows = c.fetchall()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM potholes ORDER BY timestamp DESC')
+    rows = cursor.fetchall()
     conn.close()
     result = []
     for r in rows:
         result.append({
-            'id': r[0],
-            **{k: r[k] for k in r.keys() if k != 'id'},
+            **{k: r[k] for k in r.keys()},
             'timestamp': r['timestamp'].isoformat() if r['timestamp'] else None
         })
     return jsonify(result)
