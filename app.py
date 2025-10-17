@@ -1,8 +1,9 @@
 from flask import Flask, request, jsonify, render_template, send_file, abort
 from flask_socketio import SocketIO
 from flask_cors import CORS
+from flask_sqlalchemy import SQLAlchemy
 from PIL import Image
-import io, os, sqlite3, logging, threading
+import io, os, logging, threading
 from datetime import datetime, timezone
 import numpy as np
 import torch
@@ -23,13 +24,16 @@ app = Flask(__name__)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
+# Get the absolute path of the directory where app.py is located
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 # Use Render's persistent disk path if available, otherwise default to a local 'data' directory.
-DATA_DIR = os.environ.get('RENDER_DISK_PATH', 'data')
-DATABASE_PATH = os.path.join(DATA_DIR, 'potholes.db')
+DATA_DIR = os.environ.get('RENDER_DISK_PATH', os.path.join(BASE_DIR, 'data'))
 UPLOAD_FOLDER = os.path.join(DATA_DIR, 'uploads')
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['DATABASE'] = DATABASE_PATH
+# Use DATABASE_URL from environment if available, otherwise fall back to a local SQLite DB.
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', f'sqlite:///{os.path.join(DATA_DIR, "potholes.db")}')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'a-dev-secret')
 app.config['MAX_CONTENT_LENGTH'] = 16*1024*1024  # 16 MB
 
@@ -77,28 +81,36 @@ def init_sam():
 # ------------------------
 # Database
 # ------------------------
+db = SQLAlchemy(app)
+
+class Pothole(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    latitude = db.Column(db.Float, nullable=False)
+    longitude = db.Column(db.Float, nullable=False)
+    severity = db.Column(db.String(50))
+    area = db.Column(db.Float)
+    depth_meters = db.Column(db.Float)
+    image_path = db.Column(db.String(255))
+    confidence = db.Column(db.Float)
+    timestamp = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    status = db.Column(db.String(50), default='reported')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'latitude': self.latitude,
+            'longitude': self.longitude,
+            'severity': self.severity,
+            'area': self.area,
+            'depth_meters': self.depth_meters,
+            'confidence': self.confidence,
+            'timestamp': self.timestamp.isoformat() if self.timestamp else None,
+            'status': self.status
+        }
+
 def init_db():
-    # Ensure data directories exist before initializing the database
-    os.makedirs(DATA_DIR, exist_ok=True)
-    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-    conn = sqlite3.connect(app.config['DATABASE'], detect_types=sqlite3.PARSE_DECLTYPES)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS potholes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            latitude REAL,
-            longitude REAL,
-            severity TEXT,
-            area REAL,
-            depth_meters REAL,
-            image_path TEXT,
-            confidence REAL,
-            timestamp TIMESTAMP,
-            status TEXT DEFAULT 'reported'
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    with app.app_context():
+        db.create_all()
     logger.info("Database initialized")
 
 # ------------------------
@@ -183,18 +195,18 @@ def detect_pothole():
     overlay = overlay_image(image_np, mask)
     Image.fromarray(overlay).save(filepath)
 
-    conn = sqlite3.connect(app.config['DATABASE'])
-    c = conn.cursor()
-    c.execute('''
-        INSERT INTO potholes (latitude, longitude, severity, area, depth_meters, image_path, confidence, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (latitude, longitude, severity, area_m2, depth_meters, filepath, confidence, timestamp_utc))
-    pothole_id = c.lastrowid
-    conn.commit()
-    conn.close()
+    new_pothole = Pothole(
+        latitude=latitude, longitude=longitude, severity=severity,
+        area=area_m2, depth_meters=depth_meters, image_path=filepath,
+        confidence=confidence, timestamp=timestamp_utc
+    )
+    db.session.add(new_pothole)
+    db.session.commit()
+
+    pothole_id = new_pothole.id
 
     socketio.emit('new_pothole', {
-        'id': pothole_id,
+        'id': new_pothole.id,
         'latitude': latitude,
         'longitude': longitude,
         'severity': severity,
@@ -216,19 +228,8 @@ def detect_pothole():
 
 @app.route('/potholes')
 def get_potholes():
-    conn = sqlite3.connect(app.config['DATABASE'])
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM potholes ORDER BY timestamp DESC')
-    rows = cursor.fetchall()
-    conn.close()
-    result = []
-    for r in rows:
-        result.append({
-            **{k: r[k] for k in r.keys()},
-            'timestamp': r['timestamp'].isoformat() if r['timestamp'] else None
-        })
-    return jsonify(result)
+    potholes = Pothole.query.order_by(Pothole.timestamp.desc()).all()
+    return jsonify([p.to_dict() for p in potholes])
 
 @app.route('/image/<filename>')
 def get_image(filename):
@@ -239,49 +240,42 @@ def get_image(filename):
 
 @app.route('/export/<int:pothole_id>')
 def export_pdf(pothole_id):
-    conn = sqlite3.connect(app.config['DATABASE'])
-    c = conn.cursor()
-    c.execute('SELECT * FROM potholes WHERE id=?', (pothole_id,))
-    row = c.fetchone()
-    conn.close()
-    if not row: return abort(404)
+    pothole = db.session.get(Pothole, pothole_id)
+    if not pothole:
+        return abort(404)
 
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, f"Pothole Report #{row[0]}", ln=True)
+    pdf.cell(0, 10, f"Pothole Report #{pothole.id}", ln=True)
     pdf.set_font("Arial", "", 12)
     pdf.ln(5)
-    pdf.cell(0, 8, f"Latitude: {row[1]}", ln=True)
-    pdf.cell(0, 8, f"Longitude: {row[2]}", ln=True)
-    pdf.cell(0, 8, f"Severity: {row[3]}", ln=True)
-    pdf.cell(0, 8, f"Area: {row[4]:.2f} m²", ln=True)
-    pdf.cell(0, 8, f"Depth: {row[5]:.2f} m", ln=True)
-    pdf.cell(0, 8, f"Confidence: {row[7]*100:.1f}%", ln=True)
-    pdf.cell(0, 8, f"Timestamp: {row[8]}", ln=True)
+    pdf.cell(0, 8, f"Latitude: {pothole.latitude}", ln=True)
+    pdf.cell(0, 8, f"Longitude: {pothole.longitude}", ln=True)
+    pdf.cell(0, 8, f"Severity: {pothole.severity}", ln=True)
+    pdf.cell(0, 8, f"Area: {pothole.area:.2f} m²", ln=True)
+    pdf.cell(0, 8, f"Depth: {pothole.depth_meters:.2f} m", ln=True)
+    pdf.cell(0, 8, f"Confidence: {pothole.confidence*100:.1f}%", ln=True)
+    pdf.cell(0, 8, f"Timestamp: {pothole.timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')}", ln=True)
     pdf.ln(5)
-    if os.path.exists(row[6]):
-        pdf.image(row[6], w=150)
-    pdf_path = os.path.join(app.config['UPLOAD_FOLDER'], f"pothole_report_{row[0]}.pdf")
+    if pothole.image_path and os.path.exists(pothole.image_path):
+        pdf.image(pothole.image_path, w=150)
+    pdf_path = os.path.join(app.config['UPLOAD_FOLDER'], f"pothole_report_{pothole.id}.pdf")
     pdf.output(pdf_path)
     return send_file(pdf_path)
 
 @app.route('/map')
 def show_map():
-    conn = sqlite3.connect(app.config['DATABASE'])
-    c = conn.cursor()
-    c.execute('SELECT latitude, longitude, severity, id FROM potholes')
-    rows = c.fetchall()
-    conn.close()
-    center = (rows[0][0], rows[0][1]) if rows else (40.7128, -74.0060)
+    potholes = Pothole.query.all()
+    center = (potholes[0].latitude, potholes[0].longitude) if potholes else (40.7128, -74.0060)
     m = folium.Map(
         location=center, zoom_start=13,
         tiles='http://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
         attr='© Google'
     )
-    for lat, lon, severity, pid in rows:
-        color = 'red' if severity=='high' else 'orange' if severity=='medium' else 'green'
-        folium.Marker([lat, lon], popup=f"Pothole #{pid}\nSeverity: {severity}", icon=folium.Icon(color=color)).add_to(m)
+    for p in potholes:
+        color = 'red' if p.severity=='high' else 'orange' if p.severity=='medium' else 'green'
+        folium.Marker([p.latitude, p.longitude], popup=f"Pothole #{p.id}\nSeverity: {p.severity}", icon=folium.Icon(color=color)).add_to(m)
     return m._repr_html_()
 
 # ------------------------
@@ -289,6 +283,10 @@ def show_map():
 # ------------------------
 def initialize_app():
     """Initializes database and starts background model loading."""
+    # Ensure data directories exist before initializing anything.
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
     init_sam()
     init_db()
     logger.info("App initialized")
