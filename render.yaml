@@ -6,7 +6,7 @@ services:
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
-    startCommand: gunicorn --worker-class eventlet --workers 1 --bind 0.0.0.0:$PORT app:app
+    startCommand: gunicorn --worker-class eventlet --workers 1 --bind 0.0.0.0:$PORT "app:create_app()"
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9

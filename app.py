@@ -2,8 +2,8 @@ from flask import Flask, request, jsonify, render_template, send_file, abort
 from flask_socketio import SocketIO
 from flask_cors import CORS
 from PIL import Image
-import io, os, sqlite3, logging
-from datetime import datetime
+import io, os, sqlite3, logging, threading
+from datetime import datetime, timezone
 import numpy as np
 import torch
 from segment_anything import sam_model_registry, SamPredictor
@@ -23,11 +23,15 @@ app = Flask(__name__)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['DATABASE'] = 'potholes.db'
-app.config['SECRET_KEY'] = 'your-secret-key-here'
+# Use Render's persistent disk path if available, otherwise default to a local 'data' directory.
+DATA_DIR = os.environ.get('RENDER_DISK_PATH', 'data')
+DATABASE_PATH = os.path.join(DATA_DIR, 'potholes.db')
+UPLOAD_FOLDER = os.path.join(DATA_DIR, 'uploads')
+
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['DATABASE'] = DATABASE_PATH
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'a-dev-secret')
 app.config['MAX_CONTENT_LENGTH'] = 16*1024*1024  # 16 MB
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # ------------------------
 # SAM Model
@@ -35,8 +39,11 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 predictor = None
 sam_loaded = False
 
-def init_sam():
+def _load_sam_model_blocking():
+    """The actual model loading logic. This is a blocking operation."""
     global predictor, sam_loaded
+    if sam_loaded:
+        return True
     try:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(f"Using device: {device}")
@@ -46,26 +53,35 @@ def init_sam():
 
         # If model is not in the repo, download it as a fallback.
         if not os.path.exists(checkpoint_path):
-            logger.warning(f"SAM checkpoint '{checkpoint_name}' not found. Downloading as a fallback...")
+            logger.warning(f"SAM checkpoint '{checkpoint_name}' not found. Downloading...")
             model_url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
-            torch.hub.download_url_to_file(model_url, checkpoint_path)
+            torch.hub.download_url_to_file(model_url, checkpoint_path, progress=True)
             logger.info("SAM checkpoint downloaded successfully.")
 
         sam = sam_model_registry["vit_b"](checkpoint=checkpoint_path)
         sam.to(device)
         predictor = SamPredictor(sam)
         sam_loaded = True
-        logger.info("SAM loaded successfully!")
+        logger.info("SAM model loaded successfully!")
         return True
     except Exception as e:
         logger.error(f"SAM init error: {str(e)}")
         return False
 
+def init_sam():
+    """Starts the SAM model loading in a background thread to avoid blocking server startup."""
+    if not sam_loaded:
+        logger.info("Starting SAM model initialization in a background thread.")
+        threading.Thread(target=_load_sam_model_blocking, daemon=True).start()
+
 # ------------------------
 # Database
 # ------------------------
 def init_db():
-    conn = sqlite3.connect(app.config['DATABASE'])
+    # Ensure data directories exist before initializing the database
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+    conn = sqlite3.connect(app.config['DATABASE'], detect_types=sqlite3.PARSE_DECLTYPES)
     c = conn.cursor()
     c.execute('''
         CREATE TABLE IF NOT EXISTS potholes (
@@ -77,7 +93,7 @@ def init_db():
             depth_meters REAL,
             image_path TEXT,
             confidence REAL,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            timestamp TIMESTAMP,
             status TEXT DEFAULT 'reported'
         )
     ''')
@@ -170,9 +186,9 @@ def detect_pothole():
     conn = sqlite3.connect(app.config['DATABASE'])
     c = conn.cursor()
     c.execute('''
-        INSERT INTO potholes (latitude, longitude, severity, area, depth_meters, image_path, confidence)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (latitude, longitude, severity, area_m2, depth_meters, filepath, confidence))
+        INSERT INTO potholes (latitude, longitude, severity, area, depth_meters, image_path, confidence, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (latitude, longitude, severity, area_m2, depth_meters, filepath, confidence, timestamp_utc))
     pothole_id = c.lastrowid
     conn.commit()
     conn.close()
@@ -185,7 +201,7 @@ def detect_pothole():
         'area': area_m2,
         'depth_meters': depth_meters,
         'confidence': confidence,
-        'timestamp': datetime.now().isoformat()
+        'timestamp': timestamp_utc.isoformat()
     })
 
     return jsonify({
@@ -201,7 +217,7 @@ def detect_pothole():
 @app.route('/potholes')
 def get_potholes():
     conn = sqlite3.connect(app.config['DATABASE'])
-    c = conn.cursor()
+    conn.row_factory = sqlite3.Row
     c.execute('SELECT * FROM potholes ORDER BY timestamp DESC')
     rows = c.fetchall()
     conn.close()
@@ -209,15 +225,8 @@ def get_potholes():
     for r in rows:
         result.append({
             'id': r[0],
-            'latitude': r[1],
-            'longitude': r[2],
-            'severity': r[3],
-            'area': r[4],
-            'depth_meters': r[5],
-            'image_path': r[6],
-            'confidence': r[7],
-            'timestamp': r[8],
-            'status': r[9]
+            **{k: r[k] for k in r.keys() if k != 'id'},
+            'timestamp': r['timestamp'].isoformat() if r['timestamp'] else None
         })
     return jsonify(result)
 
@@ -279,10 +288,16 @@ def show_map():
 # Main
 # ------------------------
 def initialize_app():
+    """Initializes database and starts background model loading."""
     init_sam()
     init_db()
     logger.info("App initialized")
 
+def create_app():
+    """App factory for Gunicorn to initialize before starting."""
+    initialize_app()
+    return app
+
 if __name__ == "__main__":
     initialize_app()
-    socketio.run(app, host="0.0.0.0", port=5000, debug=True)
+    socketio.run(app, host="0.0.0.0", port=int(os.environ.get('PORT', 5000)), debug=True)
