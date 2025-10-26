@@ -57,14 +57,63 @@ def init_sam():
             logger.warning(f"SAM checkpoint '{checkpoint_path}' not found. Downloading...")
             model_url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
             logger.info(f"Downloading SAM model from {model_url}")
-            torch.hub.download_url_to_file(model_url, checkpoint_path)
-            logger.info("SAM checkpoint downloaded successfully.")
+            try:
+                import requests
+                import time
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        response = requests.get(model_url, stream=True, timeout=300)
+                        downloaded = 0
+                        with open(checkpoint_path, 'wb') as f:
+                            for chunk in response.iter_content(chunk_size=8192):
+                                if chunk:
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                                    if downloaded % (10 * 1024 * 1024) == 0:  # Log every 10MB
+                                        logger.info(f"Downloaded {downloaded / (1024*1024):.2f} MB")
+                        logger.info("SAM checkpoint downloaded successfully.")
+                        break
+                    except requests.exceptions.Timeout:
+                        logger.warning(f"Download timeout (attempt {attempt+1}/{max_retries})")
+                        if attempt < max_retries - 1:
+                            time.sleep(5)
+                        else:
+                            raise
+            except Exception as e:
+                logger.error(f"Failed to download SAM model: {e}")
+                raise
         elif os.path.getsize(checkpoint_path) < 100000000:  # Check if file is less than ~100MB (actual is 375MB)
             logger.warning(f"SAM checkpoint exists but is too small ({os.path.getsize(checkpoint_path)} bytes). Downloading...")
             model_url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
             logger.info(f"Downloading SAM model from {model_url}")
-            torch.hub.download_url_to_file(model_url, checkpoint_path)
-            logger.info("SAM checkpoint downloaded successfully.")
+            try:
+                import requests
+                import time
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        response = requests.get(model_url, stream=True, timeout=300)
+                        total_size = int(response.headers.get('content-length', 0))
+                        downloaded = 0
+                        with open(checkpoint_path, 'wb') as f:
+                            for chunk in response.iter_content(chunk_size=8192):
+                                if chunk:
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                                    if downloaded % (10 * 1024 * 1024) == 0:  # Log every 10MB
+                                        logger.info(f"Downloaded {downloaded / (1024*1024):.2f} MB")
+                        logger.info("SAM checkpoint downloaded successfully.")
+                        break
+                    except requests.exceptions.Timeout:
+                        logger.warning(f"Download timeout (attempt {attempt+1}/{max_retries})")
+                        if attempt < max_retries - 1:
+                            time.sleep(5)
+                        else:
+                            raise
+            except Exception as e:
+                logger.error(f"Failed to download SAM model: {e}")
+                raise
         else:
             logger.info(f"SAM checkpoint found at {checkpoint_path} ({os.path.getsize(checkpoint_path) / (1024*1024):.2f} MB)")
 
