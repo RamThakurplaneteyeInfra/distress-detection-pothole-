@@ -1,0 +1,42 @@
+# Google Cloud Run deployment configuration
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: pothole-detector
+  annotations:
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/cpu-throttling: "false"
+    spec:
+      containerConcurrency: 10
+      timeoutSeconds: 3600
+      containers:
+        - image: gcr.io/PROJECT_ID/pothole-detector
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: FLASK_ENV
+              value: "production"
+            - name: DB_HOST
+              value: "your-postgres-host"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_NAME
+              value: "distress_db"
+            - name: DB_USER
+              value: "distress_db_user"
+            - name: DB_PASSWORD
+              value: "your-password"
+          resources:
+            limits:
+              memory: "2Gi"
+              cpu: "2"
+            requests:
+              memory: "1Gi"
+              cpu: "1"
