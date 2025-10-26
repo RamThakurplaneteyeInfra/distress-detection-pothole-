@@ -174,18 +174,36 @@ def detect_pothole():
     image_np = np.array(image)
 
     predictor.set_image(image_np)
-    h,w = image_np.shape[:2]
-    input_point = np.array([[w//2,h//2]])
-    input_label = np.array([1])
+    h, w = image_np.shape[:2]
+    
+    # Try multiple points across the image for better detection
+    # Sample points: center, left-center, right-center, top-center, bottom-center
+    input_points = np.array([
+        [w//2, h//2],        # Center
+        [w//4, h//2],        # Left-center
+        [3*w//4, h//2],      # Right-center
+        [w//2, h//4],        # Top-center
+        [w//2, 3*h//4]       # Bottom-center
+    ])
+    input_labels = np.array([1, 1, 1, 1, 1])
 
+    # Try single point first (center)
     masks, scores, _ = predictor.predict(
-        point_coords=input_point,
-        point_labels=input_label,
-        multimask_output=False
+        point_coords=input_points[[0]],
+        point_labels=input_labels[[0]],
+        multimask_output=True
     )
 
     if len(masks)==0 or masks[0].size==0:
-        return jsonify({'success': False})
+        # Try with multiple points if single point fails
+        masks, scores, _ = predictor.predict(
+            point_coords=input_points,
+            point_labels=input_labels,
+            multimask_output=True
+        )
+        
+        if len(masks)==0 or masks[0].size==0:
+            return jsonify({'success': False, 'error': 'No pothole detected'})
 
     mask = masks[0]
     confidence = float(scores[0])
