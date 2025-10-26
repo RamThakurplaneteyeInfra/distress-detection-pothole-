@@ -201,15 +201,24 @@ def detect_pothole():
     overlay = overlay_image(image_np, mask)
     Image.fromarray(overlay).save(filepath)
 
-    conn = sqlite3.connect(app.config['DATABASE'])
-    c = conn.cursor()
-    c.execute('''
-        INSERT INTO potholes (latitude, longitude, severity, area, depth_meters, image_path, confidence)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (latitude, longitude, severity, area_m2, depth_meters, filepath, confidence))
-    pothole_id = c.lastrowid
-    conn.commit()
-    conn.close()
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({'error': 'Database connection failed'}), 500
+    
+    try:
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO potholes (latitude, longitude, severity, area, depth_meters, image_path, confidence)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        ''', (latitude, longitude, severity, area_m2, depth_meters, filepath, confidence))
+        pothole_id = c.fetchone()[0]
+        conn.commit()
+    except psycopg2.Error as e:
+        logger.error(f"Database insert error: {e}")
+        return jsonify({'error': 'Failed to save pothole data'}), 500
+    finally:
+        conn.close()
 
     socketio.emit('new_pothole', {
         'id': pothole_id,
@@ -234,26 +243,34 @@ def detect_pothole():
 
 @app.route('/potholes')
 def get_potholes():
-    conn = sqlite3.connect(app.config['DATABASE'])
-    c = conn.cursor()
-    c.execute('SELECT * FROM potholes ORDER BY timestamp DESC')
-    rows = c.fetchall()
-    conn.close()
-    result = []
-    for r in rows:
-        result.append({
-            'id': r[0],
-            'latitude': r[1],
-            'longitude': r[2],
-            'severity': r[3],
-            'area': r[4],
-            'depth_meters': r[5],
-            'image_path': r[6],
-            'confidence': r[7],
-            'timestamp': r[8],
-            'status': r[9]
-        })
-    return jsonify(result)
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({'error': 'Database connection failed'}), 500
+    
+    try:
+        c = conn.cursor()
+        c.execute('SELECT * FROM potholes ORDER BY timestamp DESC')
+        rows = c.fetchall()
+        result = []
+        for r in rows:
+            result.append({
+                'id': r[0],
+                'latitude': float(r[1]) if r[1] else None,
+                'longitude': float(r[2]) if r[2] else None,
+                'severity': r[3],
+                'area': float(r[4]) if r[4] else None,
+                'depth_meters': float(r[5]) if r[5] else None,
+                'image_path': r[6],
+                'confidence': float(r[7]) if r[7] else None,
+                'timestamp': r[8].isoformat() if r[8] else None,
+                'status': r[9]
+            })
+        return jsonify(result)
+    except psycopg2.Error as e:
+        logger.error(f"Database query error: {e}")
+        return jsonify({'error': 'Failed to fetch potholes'}), 500
+    finally:
+        conn.close()
 
 @app.route('/image/<filename>')
 def get_image(filename):
@@ -264,12 +281,21 @@ def get_image(filename):
 
 @app.route('/export/<int:pothole_id>')
 def export_pdf(pothole_id):
-    conn = sqlite3.connect(app.config['DATABASE'])
-    c = conn.cursor()
-    c.execute('SELECT * FROM potholes WHERE id=?', (pothole_id,))
-    row = c.fetchone()
-    conn.close()
-    if not row: return abort(404)
+    conn = get_db_connection()
+    if not conn:
+        return abort(500)
+    
+    try:
+        c = conn.cursor()
+        c.execute('SELECT * FROM potholes WHERE id=%s', (pothole_id,))
+        row = c.fetchone()
+        if not row: 
+            return abort(404)
+    except psycopg2.Error as e:
+        logger.error(f"Database query error: {e}")
+        return abort(500)
+    finally:
+        conn.close()
 
     pdf = FPDF()
     pdf.add_page()
@@ -293,12 +319,20 @@ def export_pdf(pothole_id):
 
 @app.route('/map')
 def show_map():
-    conn = sqlite3.connect(app.config['DATABASE'])
-    c = conn.cursor()
-    c.execute('SELECT latitude, longitude, severity, id FROM potholes')
-    rows = c.fetchall()
-    conn.close()
-    center = (rows[0][0], rows[0][1]) if rows else (40.7128, -74.0060)
+    conn = get_db_connection()
+    if not conn:
+        return "Database connection failed", 500
+    
+    try:
+        c = conn.cursor()
+        c.execute('SELECT latitude, longitude, severity, id FROM potholes')
+        rows = c.fetchall()
+        center = (float(rows[0][0]), float(rows[0][1])) if rows else (40.7128, -74.0060)
+    except psycopg2.Error as e:
+        logger.error(f"Database query error: {e}")
+        return "Database query failed", 500
+    finally:
+        conn.close()
     m = folium.Map(
         location=center, zoom_start=13,
         tiles='http://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
@@ -306,7 +340,7 @@ def show_map():
     )
     for lat, lon, severity, pid in rows:
         color = 'red' if severity=='high' else 'orange' if severity=='medium' else 'green'
-        folium.Marker([lat, lon], popup=f"Pothole #{pid}\nSeverity: {severity}", icon=folium.Icon(color=color)).add_to(m)
+        folium.Marker([float(lat), float(lon)], popup=f"Pothole #{pid}\nSeverity: {severity}", icon=folium.Icon(color=color)).add_to(m)
     return m._repr_html_()
 
 # ------------------------
@@ -314,8 +348,10 @@ def show_map():
 # ------------------------
 def initialize_app():
     init_sam()
-    init_db()
-    logger.info("App initialized")
+    if init_db():
+        logger.info("App initialized successfully")
+    else:
+        logger.error("App initialization failed - database connection error")
 
 if __name__ == "__main__":
     initialize_app()
