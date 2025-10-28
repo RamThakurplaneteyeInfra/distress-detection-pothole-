@@ -144,12 +144,13 @@ def init_sam():
 def get_db_connection():
     """Get PostgreSQL database connection"""
     try:
+        # Read from environment variables directly (not from app.config to avoid stale values)
         conn = psycopg2.connect(
-            host=app.config['DB_HOST'],
-            port=app.config['DB_PORT'],
-            database=app.config['DATABASE'],
-            user=app.config['DB_USER'],
-            password=app.config['DB_PASSWORD']
+            host=os.getenv('DB_HOST', 'localhost'),
+            port=os.getenv('DB_PORT', '5432'),
+            database=os.getenv('DB_NAME', 'distress_db'),
+            user=os.getenv('DB_USER', 'postgres'),
+            password=os.getenv('DB_PASSWORD', 'admin')
         )
         return conn
     except psycopg2.Error as e:
