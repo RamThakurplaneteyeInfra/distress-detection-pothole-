@@ -80,28 +80,32 @@ def init_sam():
 # ------------------------
 # Database setup
 # ------------------------
+# ------------------------
+# Database setup
+# ------------------------
 def init_db():
     """Initialize pothole database if missing"""
-    if not os.path.exists(app.config['DATABASE']):
-        conn = sqlite3.connect(app.config['DATABASE'])
-        c = conn.cursor()
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS potholes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                latitude REAL,
-                longitude REAL,
-                severity TEXT,
-                area REAL,
-                depth_meters REAL,
-                image_path TEXT,
-                confidence REAL,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                status TEXT DEFAULT 'reported'
-            )
-        ''')
-        conn.commit()
-        conn.close()
-        logger.info("✅ SQLite database initialized successfully!")
+    db_path = app.config['DATABASE']
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS potholes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            latitude REAL,
+            longitude REAL,
+            severity TEXT,
+            area REAL,
+            depth_meters REAL,
+            image_path TEXT,
+            confidence REAL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            status TEXT DEFAULT 'reported'
+        )
+    ''')
+    conn.commit()
+    conn.close()
+    logger.info(f"✅ SQLite database initialized successfully at {db_path}")
+
 
 # ------------------------
 # Utility functions
@@ -300,3 +304,4 @@ def initialize_app():
 if __name__ == "__main__":
     initialize_app()
     socketio.run(app, host="0.0.0.0", port=5000)
+
