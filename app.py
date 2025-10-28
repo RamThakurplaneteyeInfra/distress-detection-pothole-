@@ -489,6 +489,23 @@ def initialize_app():
     sam_thread = threading.Thread(target=load_sam_background, daemon=True)
     sam_thread.start()
     logger.info("SAM model loading started in background thread")
+# ------------------------
+# Warm-up Hook
+# ------------------------
+@app.before_first_request
+def warm_up_model():
+    """Preload the SAM model so it's ready for first request"""
+    global predictor, sam_loaded
+    if predictor and sam_loaded:
+        try:
+            import numpy as np
+            dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+            predictor.set_image(dummy)
+            logger.info("[Warm-Up] SAM model preloaded successfully.")
+        except Exception as e:
+            logger.warning(f"[Warm-Up] Failed: {e}")
+    else:
+        logger.info("[Warm-Up] Skipped - SAM still loading.")
 
 # Initialize the app when module is imported (works for both development and production)
 # This ensures SAM model starts loading even when run with gunicorn
@@ -499,3 +516,4 @@ if __name__ == "__main__":
     port = int(os.getenv('PORT', '5000'))
     debug = os.getenv('FLASK_ENV') != 'production'
     socketio.run(app, host="0.0.0.0", port=port, debug=debug)
+
