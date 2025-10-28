@@ -25,44 +25,37 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['DATABASE'] = 'potholes.db'
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key-here')
+app.config['SECRET_KEY'] = 'your-secret-key-here'
 app.config['MAX_CONTENT_LENGTH'] = 16*1024*1024  # 16 MB
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # ------------------------
-# SAM Model Auto-Download Helper
+# Hugging Face Model URL
 # ------------------------
-MODEL_FILENAME = "sam_vit_b_01ec64.pth"
-MODEL_PATH = os.path.join(os.path.dirname(__file__), MODEL_FILENAME)
-MODEL_URL = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
+HF_MODEL_URL = "https://huggingface.co/AkhileshYR/sam-vit-b-model/resolve/main/sam_vit_b_01ec64.pth"
+MODEL_PATH = "sam_vit_b_01ec64.pth"
 
-def ensure_sam_model():
-    """Ensure the SAM model file is present; download if missing."""
-    if os.path.exists(MODEL_PATH) and os.path.getsize(MODEL_PATH) > 350 * 1024 * 1024:
-        logger.info(f"[Model Check] {MODEL_FILENAME} already present ({os.path.getsize(MODEL_PATH)/(1024*1024):.1f} MB)")
+def download_model():
+    """Downloads the SAM model from Hugging Face if not available locally."""
+    if os.path.exists(MODEL_PATH):
+        logger.info("Model already exists locally.")
         return True
-
-    logger.warning(f"[Model Check] {MODEL_FILENAME} missing or incomplete — starting download...")
     try:
-        with requests.get(MODEL_URL, stream=True, timeout=300) as r:
+        logger.info(f"Downloading SAM model from {HF_MODEL_URL} ...")
+        with requests.get(HF_MODEL_URL, stream=True) as r:
             r.raise_for_status()
-            total = int(r.headers.get("content-length", 0))
-            downloaded = 0
             with open(MODEL_PATH, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
-                        downloaded += len(chunk)
-                        if downloaded % (10 * 1024 * 1024) == 0:
-                            logger.info(f"Downloaded {downloaded / (1024*1024):.1f} MB / {total / (1024*1024):.1f} MB")
-        logger.info("[Model Check] SAM model downloaded successfully ✅")
+        logger.info("Model downloaded successfully.")
         return True
     except Exception as e:
-        logger.error(f"[Model Check] Failed to download SAM model: {e}")
+        logger.error(f"Error downloading model: {str(e)}")
         return False
 
 # ------------------------
-# SAM Model Initialization
+# SAM Model
 # ------------------------
 predictor = None
 sam_loaded = False
@@ -70,17 +63,18 @@ sam_loaded = False
 def init_sam():
     global predictor, sam_loaded
     try:
+        if not download_model():
+            logger.error("Failed to download SAM model.")
+            return False
+
         device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(f"Using device: {device}")
-
-        if not ensure_sam_model():
-            raise RuntimeError("SAM model missing and failed to download.")
 
         sam = sam_model_registry["vit_b"](checkpoint=MODEL_PATH)
         sam.to(device)
         predictor = SamPredictor(sam)
         sam_loaded = True
-        logger.info("SAM model loaded successfully ✅")
+        logger.info("SAM model loaded successfully!")
         return True
     except Exception as e:
         logger.error(f"SAM init error: {str(e)}")
@@ -108,7 +102,7 @@ def init_db():
     ''')
     conn.commit()
     conn.close()
-    logger.info("Database initialized")
+    logger.info("Database initialized.")
 
 # ------------------------
 # Utility
@@ -127,7 +121,7 @@ def determine_severity(area_m2):
 
 def overlay_image(image_np, mask):
     overlay = image_np.copy()
-    overlay[mask>0] = [255,0,0]
+    overlay[mask > 0] = [255, 0, 0]
     return overlay
 
 # ------------------------
@@ -140,7 +134,7 @@ def index():
 @app.route('/detect', methods=['POST'])
 def detect_pothole():
     if not sam_loaded:
-        return jsonify({'error': 'Model is still loading on server. Please retry shortly.'}), 503
+        return jsonify({'error': 'SAM not loaded'}), 500
     if 'image' not in request.files:
         return jsonify({'error': 'No image uploaded'}), 400
 
@@ -155,8 +149,8 @@ def detect_pothole():
     image_np = np.array(image)
 
     predictor.set_image(image_np)
-    h,w = image_np.shape[:2]
-    input_point = np.array([[w//2,h//2]])
+    h, w = image_np.shape[:2]
+    input_point = np.array([[w // 2, h // 2]])
     input_label = np.array([1])
 
     masks, scores, _ = predictor.predict(
@@ -165,7 +159,7 @@ def detect_pothole():
         multimask_output=False
     )
 
-    if len(masks)==0 or masks[0].size==0:
+    if len(masks) == 0 or masks[0].size == 0:
         return jsonify({'success': False})
 
     mask = masks[0]
@@ -220,11 +214,20 @@ def get_potholes():
     c.execute('SELECT * FROM potholes ORDER BY timestamp DESC')
     rows = c.fetchall()
     conn.close()
-    result = [{
-        'id': r[0], 'latitude': r[1], 'longitude': r[2], 'severity': r[3],
-        'area': r[4], 'depth_meters': r[5], 'image_path': r[6],
-        'confidence': r[7], 'timestamp': r[8], 'status': r[9]
-    } for r in rows]
+    result = []
+    for r in rows:
+        result.append({
+            'id': r[0],
+            'latitude': r[1],
+            'longitude': r[2],
+            'severity': r[3],
+            'area': r[4],
+            'depth_meters': r[5],
+            'image_path': r[6],
+            'confidence': r[7],
+            'timestamp': r[8],
+            'status': r[9]
+        })
     return jsonify(result)
 
 @app.route('/image/<filename>')
@@ -274,9 +277,7 @@ def show_map():
     m = folium.Map(location=center, zoom_start=13)
     for lat, lon, severity, pid in rows:
         color = 'red' if severity=='high' else 'orange' if severity=='medium' else 'green'
-        folium.Marker([lat, lon],
-                      popup=f"Pothole #{pid}\nSeverity: {severity}",
-                      icon=folium.Icon(color=color)).add_to(m)
+        folium.Marker([lat, lon], popup=f"Pothole #{pid}\nSeverity: {severity}", icon=folium.Icon(color=color)).add_to(m)
     return m._repr_html_()
 
 # ------------------------
@@ -284,9 +285,8 @@ def show_map():
 # ------------------------
 def initialize_app():
     init_db()
-    logger.info("Initializing SAM model...")
     init_sam()
-    logger.info("App initialized ✅")
+    logger.info("App initialized successfully.")
 
 if __name__ == "__main__":
     initialize_app()
