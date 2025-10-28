@@ -10,6 +10,9 @@ from segment_anything import sam_model_registry, SamPredictor
 import folium
 from fpdf import FPDF
 from dotenv import load_dotenv
+import threading
+import time
+import requests
 
 # Load environment variables
 load_dotenv()
@@ -38,130 +41,124 @@ app.config['MAX_CONTENT_LENGTH'] = int(os.getenv('MAX_CONTENT_LENGTH', 16*1024*1
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # ------------------------
-# SAM Model
+# SAM Model Globals
 # ------------------------
 predictor = None
 sam_loaded = False
-sam_loading_status = "not_started"  # not_started, downloading, loading, ready, failed
+sam_loading_status = "not_started"  # not_started, checking_model, downloading, loading, ready, failed
 
-def init_sam():
-    global predictor, sam_loaded, sam_loading_status
+# ------------------------
+# SAM Model Auto-Download Helper
+# ------------------------
+MODEL_FILENAME = "sam_vit_b_01ec64.pth"
+MODEL_PATH = os.path.join(os.path.dirname(__file__), MODEL_FILENAME)
+MODEL_URL = os.getenv("SAM_MODEL_URL", "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth")
+
+def ensure_sam_model():
+    """Ensure the SAM model file is present; download if missing or incomplete."""
     try:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info(f"[SAM Init] Using device: {device}")
-        sam_loading_status = "checking_model"
+        # Quick size check — SAM base ~375 MB
+        if os.path.exists(MODEL_PATH) and os.path.getsize(MODEL_PATH) > 350 * 1024 * 1024:
+            logger.info(f"[Model Check] {MODEL_FILENAME} present ({os.path.getsize(MODEL_PATH)/(1024*1024):.1f} MB)")
+            return True
 
-        checkpoint_name = "sam_vit_b_01ec64.pth"
-        checkpoint_path = os.path.join(os.path.dirname(__file__), checkpoint_name)
-
-        # Check if model file exists and is valid (actual size is ~375MB)
-        if not os.path.exists(checkpoint_path):
-            logger.warning(f"[SAM Init] Checkpoint '{checkpoint_path}' not found. Downloading...")
-            sam_loading_status = "downloading"
-            model_url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
-            logger.info(f"[SAM Init] Downloading from {model_url}")
-            try:
-                import requests
-                import time
-                max_retries = 3
-                for attempt in range(max_retries):
-                    try:
-                        response = requests.get(model_url, stream=True, timeout=300)
-                        downloaded = 0
-                        with open(checkpoint_path, 'wb') as f:
-                            for chunk in response.iter_content(chunk_size=8192):
-                                if chunk:
-                                    f.write(chunk)
-                                    downloaded += len(chunk)
-                                    if downloaded % (10 * 1024 * 1024) == 0:  # Log every 10MB
-                                        logger.info(f"Downloaded {downloaded / (1024*1024):.2f} MB")
-                        logger.info("SAM checkpoint downloaded successfully.")
-                        break
-                    except requests.exceptions.Timeout:
-                        logger.warning(f"Download timeout (attempt {attempt+1}/{max_retries})")
-                        if attempt < max_retries - 1:
-                            time.sleep(5)
-                        else:
-                            raise
-            except Exception as e:
-                logger.error(f"Failed to download SAM model: {e}")
-                raise
-        elif os.path.getsize(checkpoint_path) < 100000000:  # Check if file is less than ~100MB (actual is 375MB)
-            logger.warning(f"[SAM Init] Checkpoint too small ({os.path.getsize(checkpoint_path)} bytes). Downloading...")
-            sam_loading_status = "downloading"
-            model_url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
-            logger.info(f"[SAM Init] Downloading from {model_url}")
-            try:
-                import requests
-                import time
-                max_retries = 3
-                for attempt in range(max_retries):
-                    try:
-                        response = requests.get(model_url, stream=True, timeout=300)
-                        total_size = int(response.headers.get('content-length', 0))
-                        downloaded = 0
-                        with open(checkpoint_path, 'wb') as f:
-                            for chunk in response.iter_content(chunk_size=8192):
-                                if chunk:
-                                    f.write(chunk)
-                                    downloaded += len(chunk)
-                                    if downloaded % (10 * 1024 * 1024) == 0:  # Log every 10MB
-                                        logger.info(f"Downloaded {downloaded / (1024*1024):.2f} MB")
-                        logger.info("SAM checkpoint downloaded successfully.")
-                        break
-                    except requests.exceptions.Timeout:
-                        logger.warning(f"Download timeout (attempt {attempt+1}/{max_retries})")
-                        if attempt < max_retries - 1:
-                            time.sleep(5)
-                        else:
-                            raise
-            except Exception as e:
-                logger.error(f"Failed to download SAM model: {e}")
-                raise
-        else:
-            logger.info(f"[SAM Init] Checkpoint found at {checkpoint_path} ({os.path.getsize(checkpoint_path) / (1024*1024):.2f} MB)")
-
-        logger.info(f"[SAM Init] Loading model into memory...")
-        sam_loading_status = "loading"
-        sam = sam_model_registry["vit_b"](checkpoint=checkpoint_path)
-        sam.to(device)
-        predictor = SamPredictor(sam)
-        sam_loaded = True
-        sam_loading_status = "ready"
-        logger.info("[SAM Init] SAM loaded successfully!")
+        logger.warning(f"[Model Check] {MODEL_FILENAME} missing or incomplete — starting download...")
+        with requests.get(MODEL_URL, stream=True, timeout=300) as r:
+            r.raise_for_status()
+            total = int(r.headers.get("content-length", 0))
+            downloaded = 0
+            with open(MODEL_PATH, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        # Log every ~10 MB
+                        if downloaded % (10 * 1024 * 1024) < 8192:
+                            if total > 0:
+                                percent = (downloaded / total) * 100
+                                logger.info(f"[Model Download] {percent:.1f}% ({downloaded / (1024*1024):.1f} MB / {total / (1024*1024):.1f} MB)")
+                            else:
+                                logger.info(f"[Model Download] downloaded {downloaded / (1024*1024):.1f} MB")
+        logger.info("[Model Check] SAM model downloaded successfully ✅")
         return True
     except Exception as e:
+        logger.error(f"[Model Check] Failed to download SAM model: {e}")
+        return False
+
+# ------------------------
+# SAM Initialization
+# ------------------------
+def init_sam():
+    """Initialize the Segment Anything Model (SAM) and create a SamPredictor."""
+    global predictor, sam_loaded, sam_loading_status
+    try:
+        sam_loading_status = "checking_model"
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"[SAM Init] Using device: {device}")
+
+        # Ensure model exists (download if necessary)
+        sam_loading_status = "ensuring_model"
+        if not ensure_sam_model():
+            sam_loading_status = "failed"
+            logger.error("[SAM Init] Cannot ensure SAM model file is present.")
+            return False
+
+        sam_loading_status = "loading"
+        logger.info("[SAM Init] Loading SAM model into memory...")
+        sam = sam_model_registry["vit_b"](checkpoint=MODEL_PATH)
+        sam.to(device)
+
+        predictor = SamPredictor(sam)
+
+        # Warm up with a dummy image to allocate memory (do not run heavy ops here)
+        try:
+            dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+            predictor.set_image(dummy)
+            logger.info("[SAM Init] Warm-up set_image executed.")
+        except Exception as e:
+            # Not fatal — continue
+            logger.warning(f"[SAM Init] Warm-up failed (non-fatal): {e}")
+
+        sam_loaded = True
+        sam_loading_status = "ready"
+        logger.info("[SAM Init] SAM model loaded successfully ✅")
+        return True
+    except Exception as e:
+        sam_loaded = False
         sam_loading_status = "failed"
-        logger.error(f"[SAM Init] Error: {str(e)}")
-        logger.error(f"[SAM Init] Error type: {type(e).__name__}")
+        logger.error(f"[SAM Init] Error during initialization: {e}")
         import traceback
         logger.error(traceback.format_exc())
         return False
 
 # ------------------------
-# Database
+# Database helpers
 # ------------------------
 def get_db_connection():
-    """Get PostgreSQL database connection"""
+    """Get PostgreSQL database connection. Supports DATABASE_URL env fallback."""
     try:
-        # Read from environment variables directly (not from app.config to avoid stale values)
-        conn = psycopg2.connect(
-            host=os.getenv('DB_HOST', 'localhost'),
-            port=os.getenv('DB_PORT', '5432'),
-            database=os.getenv('DB_NAME', 'distress_db'),
-            user=os.getenv('DB_USER', 'postgres'),
-            password=os.getenv('DB_PASSWORD', 'admin')
-        )
+        database_url = os.getenv("DATABASE_URL")
+        if database_url:
+            # If a single DATABASE_URL is provided, use it (common on cloud providers)
+            conn = psycopg2.connect(database_url)
+        else:
+            conn = psycopg2.connect(
+                host=os.getenv('DB_HOST', app.config['DB_HOST']),
+                port=os.getenv('DB_PORT', app.config['DB_PORT']),
+                database=os.getenv('DB_NAME', app.config['DATABASE']),
+                user=os.getenv('DB_USER', app.config['DB_USER']),
+                password=os.getenv('DB_PASSWORD', app.config['DB_PASSWORD'])
+            )
         return conn
     except psycopg2.Error as e:
-        logger.error(f"Database connection error: {e}")
+        logger.error(f"[DB] Connection error: {e}")
         return None
 
 def init_db():
     """Initialize PostgreSQL database and create tables"""
     conn = get_db_connection()
     if not conn:
-        logger.warning("Failed to connect to database. App will continue without database.")
+        logger.warning("[DB] Failed to connect to database. App will continue without DB.")
         return False
     
     try:
@@ -175,16 +172,16 @@ def init_db():
                 area DECIMAL(10, 4),
                 depth_meters DECIMAL(6, 3),
                 image_path TEXT,
-                confidence DECIMAL(4, 3),
+                confidence DECIMAL(6, 4),
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 status VARCHAR(20) DEFAULT 'reported'
             )
         ''')
         conn.commit()
-        logger.info("Database initialized successfully")
+        logger.info("[DB] Database initialized successfully")
         return True
     except psycopg2.Error as e:
-        logger.warning(f"Database initialization error: {e}. App will continue without database.")
+        logger.warning(f"[DB] Initialization error: {e}. App will continue without DB.")
         return False
     finally:
         conn.close()
@@ -198,7 +195,6 @@ def estimate_area(area_pixels):
 
 def estimate_depth(area_m2):
     # Rough depth estimation: small area -> shallow, large area -> deeper
-    # Example scaling: 0.05 m minimum, +0.2 m for large potholes
     return 0.05 + min(area_m2 * 0.5, 0.5)
 
 def determine_severity(area_m2):
@@ -208,7 +204,7 @@ def determine_severity(area_m2):
 
 def overlay_image(image_np, mask):
     overlay = image_np.copy()
-    overlay[mask>0] = [255,0,0]
+    overlay[mask > 0] = [255, 0, 0]
     return overlay
 
 # ------------------------
@@ -216,15 +212,13 @@ def overlay_image(image_np, mask):
 # ------------------------
 @app.route('/')
 def index():
-    return render_template('index1.html', sam_loaded=sam_loaded)
+    return render_template('index1.html', sam_loaded=sam_loaded, sam_loading_status=sam_loading_status)
 
 @app.route('/health')
 def health_check():
     """Provides a health check endpoint for the frontend to poll."""
-    checkpoint_name = "sam_vit_b_01ec64.pth"
-    checkpoint_path = os.path.join(os.path.dirname(__file__), checkpoint_name)
-    model_exists = os.path.exists(checkpoint_path)
-    model_size = os.path.getsize(checkpoint_path) if model_exists else 0
+    model_exists = os.path.exists(MODEL_PATH)
+    model_size = os.path.getsize(MODEL_PATH) if model_exists else 0
     model_size_mb = model_size / (1024 * 1024) if model_exists else 0
     
     # Determine model status
@@ -244,35 +238,29 @@ def health_check():
         'model_size_mb': round(model_size_mb, 2) if model_exists else 0,
         'model_status': model_status,
         'sam_ready': sam_loaded and model_status == "ready",
-        'checkpoint_path': checkpoint_path
+        'checkpoint_path': MODEL_PATH
     })
 
 @app.route('/debug')
 def debug_info():
     """Detailed debug endpoint for troubleshooting."""
-    checkpoint_name = "sam_vit_b_01ec64.pth"
-    checkpoint_path = os.path.join(os.path.dirname(__file__), checkpoint_name)
-    model_exists = os.path.exists(checkpoint_path)
-    
-    import os.path
+    model_exists = os.path.exists(MODEL_PATH)
     debug_info = {
         'sam_loaded': sam_loaded,
         'sam_loading_status': sam_loading_status,
         'model_file_exists': model_exists,
-        'model_file_path': checkpoint_path,
-        'model_file_size_bytes': os.path.getsize(checkpoint_path) if model_exists else 0,
-        'model_file_size_mb': round(os.path.getsize(checkpoint_path) / (1024 * 1024), 2) if model_exists else 0,
+        'model_file_path': MODEL_PATH,
+        'model_file_size_bytes': os.path.getsize(MODEL_PATH) if model_exists else 0,
+        'model_file_size_mb': round(os.path.getsize(MODEL_PATH) / (1024 * 1024), 2) if model_exists else 0,
         'working_directory': os.getcwd(),
-        'files_in_dir': sorted([f for f in os.listdir('.') if os.path.isfile(f)])[:20],
-        'torch_available': True,
+        'files_in_dir': sorted([f for f in os.listdir('.') if os.path.isfile(f)])[:50],
         'torch_device': "cuda" if torch.cuda.is_available() else "cpu"
     }
-    
     return jsonify(debug_info)
 
 @app.route('/detect', methods=['POST'])
 def detect_pothole():
-    if not sam_loaded:
+    if not sam_loaded or predictor is None:
         return jsonify({'error': 'SAM not loaded'}), 500
     if 'image' not in request.files:
         return jsonify({'error': 'No image uploaded'}), 400
@@ -281,29 +269,37 @@ def detect_pothole():
     if image_file.filename == '':
         return jsonify({'error': 'No image selected'}), 400
 
-    latitude = float(request.form.get('latitude', 0.0))
-    longitude = float(request.form.get('longitude', 0.0))
+    try:
+        latitude = float(request.form.get('latitude', 0.0))
+        longitude = float(request.form.get('longitude', 0.0))
+    except Exception:
+        latitude = 0.0
+        longitude = 0.0
 
     image = Image.open(image_file.stream).convert('RGB')
     image_np = np.array(image)
 
-    predictor.set_image(image_np)
-    h,w = image_np.shape[:2]
-    input_point = np.array([[w//2,h//2]])
-    input_label = np.array([1])
+    try:
+        predictor.set_image(image_np)
+        h, w = image_np.shape[:2]
+        input_point = np.array([[w//2, h//2]])
+        input_label = np.array([1])
 
-    masks, scores, _ = predictor.predict(
-        point_coords=input_point,
-        point_labels=input_label,
-        multimask_output=False
-    )
+        masks, scores, _ = predictor.predict(
+            point_coords=input_point,
+            point_labels=input_label,
+            multimask_output=False
+        )
+    except Exception as e:
+        logger.error(f"[Detect] Predictor error: {e}")
+        return jsonify({'error': 'Model inference error'}), 500
 
-    if len(masks)==0 or masks[0].size==0:
+    if len(masks) == 0 or masks[0].size == 0:
         return jsonify({'success': False})
 
     mask = masks[0]
-    confidence = float(scores[0])
-    area_pixels = np.sum(mask)
+    confidence = float(scores[0]) if len(scores) > 0 else 0.0
+    area_pixels = int(np.sum(mask))
     area_m2 = estimate_area(area_pixels)
     severity = determine_severity(area_m2)
     depth_meters = estimate_depth(area_m2)
@@ -315,7 +311,7 @@ def detect_pothole():
     overlay = overlay_image(image_np, mask)
     Image.fromarray(overlay).save(filepath)
 
-    # Try to save to database if available
+    # Save to database if available
     pothole_id = None
     conn = get_db_connection()
     if conn:
@@ -326,9 +322,10 @@ def detect_pothole():
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             ''', (latitude, longitude, severity, area_m2, depth_meters, filepath, confidence))
-            pothole_id = c.fetchone()[0]
+            row = c.fetchone()
+            if row:
+                pothole_id = int(row[0])
             conn.commit()
-            
             socketio.emit('new_pothole', {
                 'id': pothole_id,
                 'latitude': latitude,
@@ -340,11 +337,11 @@ def detect_pothole():
                 'timestamp': datetime.now().isoformat()
             })
         except psycopg2.Error as e:
-            logger.error(f"Database insert error: {e}")
+            logger.error(f"[DB] Insert error: {e}")
         finally:
             conn.close()
     else:
-        logger.warning("No database connection available - results not saved to database")
+        logger.warning("[DB] No database connection available - results not saved to database")
 
     return jsonify({
         'success': True,
@@ -383,7 +380,7 @@ def get_potholes():
             })
         return jsonify(result)
     except psycopg2.Error as e:
-        logger.error(f"Database query error: {e}")
+        logger.error(f"[DB] Query error: {e}")
         return jsonify({'error': 'Failed to fetch potholes'}), 500
     finally:
         conn.close()
@@ -408,7 +405,7 @@ def export_pdf(pothole_id):
         if not row: 
             return abort(404)
     except psycopg2.Error as e:
-        logger.error(f"Database query error: {e}")
+        logger.error(f"[DB] Query error: {e}")
         return abort(500)
     finally:
         conn.close()
@@ -451,7 +448,7 @@ def show_map():
         rows = c.fetchall()
         center = (float(rows[0][0]), float(rows[0][1])) if rows else (40.7128, -74.0060)
     except psycopg2.Error as e:
-        logger.error(f"Database query error: {e}")
+        logger.error(f"[DB] Query error: {e}")
         return "Database query failed", 500
     finally:
         conn.close()
@@ -466,54 +463,70 @@ def show_map():
     return m._repr_html_()
 
 # ------------------------
-# Main
+# Warm-up Hook
+# ------------------------
+@app.before_first_request
+def warm_up_model():
+    """Preload the SAM model so it's ready for the first request."""
+    global predictor, sam_loaded
+    if predictor is not None and sam_loaded:
+        try:
+            dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+            predictor.set_image(dummy)
+            logger.info("[Warm-Up] SAM model preloaded successfully.")
+        except Exception as e:
+            logger.warning(f"[Warm-Up] Failed (non-fatal): {e}")
+    else:
+        logger.info("[Warm-Up] Skipped - SAM still loading or predictor unavailable.")
+
+# ------------------------
+# Keep-Alive (optional)
+# ------------------------
+def keep_alive_loop():
+    app_url = os.getenv("APP_URL")
+    if not app_url:
+        logger.info("[Keep-Alive] APP_URL not set; skipping keep-alive pings.")
+        return
+    while True:
+        try:
+            resp = requests.get(f"{app_url.rstrip('/')}/health", timeout=10)
+            logger.info(f"[Keep-Alive] Pinged health: {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"[Keep-Alive] Ping failed: {e}")
+        time.sleep(900)  # 15 minutes
+
+if os.getenv("KEEP_ALIVE", "false").lower() in ("1", "true", "yes"):
+    t = threading.Thread(target=keep_alive_loop, daemon=True)
+    t.start()
+    logger.info("[Keep-Alive] Keep-alive thread started.")
+
+# ------------------------
+# App Initialization (DB + SAM loader)
 # ------------------------
 def initialize_app():
-    # Initialize database first (this is fast)
+    # Initialize database first (fast)
     db_initialized = init_db()
     if db_initialized:
         logger.info("App initialized successfully with database")
     else:
         logger.info("App initialized successfully without database (database features may be limited)")
-    
-    # Initialize SAM model in background thread (this is slow)
-    import threading
+
+    # Initialize SAM model in background thread (slow)
     def load_sam_background():
         logger.info("Starting SAM model initialization in background...")
         success = init_sam()
         if success:
-            logger.info("SAM model loaded successfully!")
+            logger.info("SAM model loaded successfully in background")
         else:
-            logger.error("Failed to load SAM model")
-    
+            logger.error("Failed to load SAM model in background")
     sam_thread = threading.Thread(target=load_sam_background, daemon=True)
     sam_thread.start()
     logger.info("SAM model loading started in background thread")
-# ------------------------
-# Warm-up Hook
-# ------------------------
-@app.before_first_request
-def warm_up_model():
-    """Preload the SAM model so it's ready for first request"""
-    global predictor, sam_loaded
-    if predictor and sam_loaded:
-        try:
-            import numpy as np
-            dummy = np.zeros((640, 640, 3), dtype=np.uint8)
-            predictor.set_image(dummy)
-            logger.info("[Warm-Up] SAM model preloaded successfully.")
-        except Exception as e:
-            logger.warning(f"[Warm-Up] Failed: {e}")
-    else:
-        logger.info("[Warm-Up] Skipped - SAM still loading.")
 
 # Initialize the app when module is imported (works for both development and production)
-# This ensures SAM model starts loading even when run with gunicorn
 initialize_app()
 
 if __name__ == "__main__":
-    # Use environment variable for port, default to 5000 for local development
     port = int(os.getenv('PORT', '5000'))
     debug = os.getenv('FLASK_ENV') != 'production'
     socketio.run(app, host="0.0.0.0", port=port, debug=debug)
-
