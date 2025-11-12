@@ -1,7 +1,4 @@
-# cloudbuild.yaml
-# Compatible with Cloud Build Triggers and supports substitution variables
-# Project: lofty-voyage-477911-m6
-
+# cloudbuild.yaml — fixed and validated
 substitutions:
   _AR_HOSTNAME: 'europe-west1-docker.pkg.dev'
   _AR_PROJECT_ID: 'lofty-voyage-477911-m6'
@@ -12,7 +9,7 @@ substitutions:
   _TRIGGER_ID: '46310ca3-3f21-444c-b59b-403ff8109133'
 
 steps:
-  # Step 1: Build Docker image using combined variable string
+  # Step 1 — Build
   - name: 'gcr.io/cloud-builders/docker'
     id: Build
     entrypoint: bash
@@ -20,10 +17,10 @@ steps:
       - -c
       - |
         IMAGE_URI="${_AR_HOSTNAME}/${_AR_PROJECT_ID}/${_AR_REPOSITORY}/${_SERVICE_NAME}:latest"
-        echo "Building image: ${IMAGE_URI}"
+        echo "Building ${IMAGE_URI}"
         docker build -t "${IMAGE_URI}" .
 
-  # Step 2: Push image to Artifact Registry
+  # Step 2 — Push
   - name: 'gcr.io/cloud-builders/docker'
     id: Push
     entrypoint: bash
@@ -31,10 +28,10 @@ steps:
       - -c
       - |
         IMAGE_URI="${_AR_HOSTNAME}/${_AR_PROJECT_ID}/${_AR_REPOSITORY}/${_SERVICE_NAME}:latest"
-        echo "Pushing image: ${IMAGE_URI}"
+        echo "Pushing ${IMAGE_URI}"
         docker push "${IMAGE_URI}"
 
-  # Step 3: Deploy to Cloud Run using gcloud CLI
+  # Step 3 — Deploy
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: Deploy
     entrypoint: bash
@@ -42,7 +39,7 @@ steps:
       - -c
       - |
         IMAGE_URI="${_AR_HOSTNAME}/${_AR_PROJECT_ID}/${_AR_REPOSITORY}/${_SERVICE_NAME}:latest"
-        echo "Deploying to Cloud Run service: ${_SERVICE_NAME} in region ${_DEPLOY_REGION}"
+        echo "Deploying ${_SERVICE_NAME} to ${_DEPLOY_REGION}"
         gcloud run deploy "${_SERVICE_NAME}" \
           --image "${IMAGE_URI}" \
           --region "${_DEPLOY_REGION}" \
