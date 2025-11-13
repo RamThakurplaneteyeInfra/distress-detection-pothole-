@@ -1,6 +1,3 @@
-# cloudbuild.yaml — GPU-enabled, Europe-West4
-# Builds, pushes, and deploys your SAM model container to Cloud Run
-
 substitutions:
   _AR_HOSTNAME: 'europe-west4-docker.pkg.dev'
   _AR_PROJECT_ID: 'lofty-voyage-477911-m6'
@@ -11,45 +8,42 @@ substitutions:
   _TRIGGER_ID: '46310ca3-3f21-444c-b59b-403ff8109133'
 
 steps:
-  # Step 1 — Build Docker image manually (no Buildpacks)
+  # Step 1 — Build Docker image (must use CUDA base image for GPU)
   - name: 'gcr.io/cloud-builders/docker'
     id: Build
-    args:
-      [
-        'build',
-        '-t',
-        '${_AR_HOSTNAME}/${_AR_PROJECT_ID}/${_AR_REPOSITORY}/${_SERVICE_NAME}:latest',
-        '.'
-      ]
+    args: [
+      'build',
+      '-t',
+      '${_AR_HOSTNAME}/${_AR_PROJECT_ID}/${_AR_REPOSITORY}/${_SERVICE_NAME}:latest',
+      '.'
+    ]
 
   # Step 2 — Push image to Artifact Registry
   - name: 'gcr.io/cloud-builders/docker'
     id: Push
-    args:
-      [
-        'push',
-        '${_AR_HOSTNAME}/${_AR_PROJECT_ID}/${_AR_REPOSITORY}/${_SERVICE_NAME}:latest'
-      ]
+    args: [
+      'push',
+      '${_AR_HOSTNAME}/${_AR_PROJECT_ID}/${_AR_REPOSITORY}/${_SERVICE_NAME}:latest'
+    ]
 
-  # Step 3 — Deploy to Cloud Run (GPU-enabled)
+  # Step 3 — Deploy to Cloud Run GPU (Europe-west4, L4, 8Gi RAM, 4CPU)
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: Deploy
     entrypoint: gcloud
-    args:
-      [
-        'run', 'deploy', '${_SERVICE_NAME}',
-        '--image', '${_AR_HOSTNAME}/${_AR_PROJECT_ID}/${_AR_REPOSITORY}/${_SERVICE_NAME}:latest',
-        '--region', '${_DEPLOY_REGION}',
-        '--platform', '${_PLATFORM}',
-        '--execution-environment=gen2',
-        '--gpu=1',
-        '--gpu-type=nvidia-l4',
-        '--cpu=4',
-        '--memory=8Gi',
-        '--timeout=900',
-        '--max-instances=1',
-        '--allow-unauthenticated'
-      ]
+    args: [
+      'run', 'deploy', '${_SERVICE_NAME}',
+      '--image', '${_AR_HOSTNAME}/${_AR_PROJECT_ID}/${_AR_REPOSITORY}/${_SERVICE_NAME}:latest',
+      '--region', '${_DEPLOY_REGION}',
+      '--platform', '${_PLATFORM}',
+      '--execution-environment=gen2',
+      '--gpu=1',
+      '--gpu-type=nvidia-l4',
+      '--cpu=4',
+      '--memory=8Gi',
+      '--timeout=900',
+      '--max-instances=1',
+      '--allow-unauthenticated'
+    ]
 
 options:
   logging: CLOUD_LOGGING_ONLY
