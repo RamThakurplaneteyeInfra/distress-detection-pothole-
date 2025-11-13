@@ -305,9 +305,12 @@ def initialize_app():
     init_sam()
     logger.info("✅ Application initialized successfully.")
 
+# Always run initialization—this ensures DB/model are loaded for Gunicorn/Cloud Run imports
+initialize_app()
+
 if __name__ == "__main__":
-    initialize_app()
-    socketio.run(app, host="0.0.0.0", port=8080,allow_unsafe_werkzeug=True)
+    # Development/run locally:
+    socketio.run(app, host="0.0.0.0", port=8080, allow_unsafe_werkzeug=True)
 
 
 
