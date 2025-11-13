@@ -23,8 +23,8 @@ app = Flask(__name__)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['DATABASE'] = 'potholes.db'
+app.config['UPLOAD_FOLDER'] = '/tmp/uploads'
+app.config['DATABASE'] = '/tmp/potholes.db'
 app.config['SECRET_KEY'] = 'your-secret-key-here'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -307,6 +307,7 @@ def initialize_app():
 
 if __name__ == "__main__":
     initialize_app()
-    socketio.run(app, host="0.0.0.0", port=8000,allow_unsafe_werkzeug=True)
+    socketio.run(app, host="0.0.0.0", port=8080,allow_unsafe_werkzeug=True)
+
 
 
