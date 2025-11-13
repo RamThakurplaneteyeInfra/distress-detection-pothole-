@@ -32,7 +32,7 @@ class PotholeDetector {
   async checkBackendStatus() {
     const statusEl = document.getElementById("statusAlert");
     const setStatus = (cls, text) => {
-      statusEl.className = 'alert ${cls} py-2';
+      statusEl.className = `alert ${cls} py-2`;
       statusEl.textContent = text;
       statusEl.style.display = "block";
     };
