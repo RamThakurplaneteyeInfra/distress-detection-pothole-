@@ -1,3 +1,5 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+
 bidict==0.23.1
 blinker==1.9.0
 branca==0.8.1
@@ -29,9 +31,8 @@ python-dotenv==1.0.0
 python-engineio==4.12.3
 python-socketio==5.14.1
 requests==2.32.5
-segment-anything==1.0
+segment-anything @ git+https://github.com/facebookresearch/segment-anything.git
 simple-websocket==1.1.0
-six==1.17.0
 sympy==1.14.0
 torch==2.0.1+cpu
 torchvision==0.15.2+cpu
@@ -44,5 +45,4 @@ setuptools==68.2.2
 wheel==0.42.0
 fpdf2==2.7.9
 psycopg2-binary==2.9.9
---extra-index-url https://download.pytorch.org/whl/cpu
 gdown==5.2.0
